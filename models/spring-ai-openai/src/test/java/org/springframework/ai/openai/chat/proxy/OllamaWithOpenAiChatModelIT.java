@@ -64,6 +64,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * provider.
  *
  * @author Ilayaperumal Gopinathan
+ * @author Sebastien Deleuze
  */
 @Testcontainers
 @SpringBootTest(classes = OllamaWithOpenAiChatModelIT.Config.class)
@@ -93,7 +94,7 @@ class OllamaWithOpenAiChatModelIT {
 	@BeforeAll
 	public static void beforeAll() throws IOException, InterruptedException {
 		if (!SKIP_CONTAINER_CREATION) {
-			ollamaContainer = new OllamaContainer("ollama/ollama:0.10.1").withReuse(true);
+			ollamaContainer = new OllamaContainer("ollama/ollama:0.23.1").withReuse(true);
 			ollamaContainer.start();
 			logger.info(
 					"Start pulling the '" + DEFAULT_OLLAMA_MODEL + " ' generative ... would take several minutes ...");
@@ -309,6 +310,7 @@ class OllamaWithOpenAiChatModelIT {
 			return OpenAiChatModel.builder()
 				.options(OpenAiChatOptions.builder()
 					.baseUrl(getBaseUrl())
+					.apiKey("ollama") // required but ignored
 					.model(DEFAULT_OLLAMA_MODEL)
 					.timeout(Duration.ofMinutes(5))
 					.build())

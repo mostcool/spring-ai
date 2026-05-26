@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -105,7 +106,6 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.model.ModelOptionsUtils;
 import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionEligibilityPredicate;
 import org.springframework.ai.model.tool.ToolExecutionResult;
@@ -143,6 +143,7 @@ import org.springframework.web.client.RestClientException;
  * @author Jihoon Kim
  * @author Soby Chacko
  * @author Sun Yuhan
+ * @author Thomas Vitale
  * @since 1.0.0
  */
 public class BedrockProxyChatModel implements ChatModel {
@@ -171,6 +172,8 @@ public class BedrockProxyChatModel implements ChatModel {
 	 * executed.
 	 */
 	private final ToolExecutionEligibilityPredicate toolExecutionEligibilityPredicate;
+
+	private final AtomicBoolean internalToolExecutionWarned = new AtomicBoolean(false);
 
 	/**
 	 * Conventions to use for generating observations.
@@ -268,6 +271,11 @@ public class BedrockProxyChatModel implements ChatModel {
 
 		if (this.toolExecutionEligibilityPredicate.isToolExecutionRequired(options, chatResponse)
 				&& chatResponse.hasFinishReasons(Set.of(StopReason.TOOL_USE.toString()))) {
+			if (this.internalToolExecutionWarned.compareAndSet(false, true)) {
+				logger.warn(
+						"Internal tool execution in BedrockProxyChatModel is deprecated since 2.0.0 and will be removed in 3.0.0. "
+								+ "Use ChatClient with ToolCallAdvisor instead.");
+			}
 			var toolExecutionResult = this.toolCallingManager.executeToolCalls(prompt, chatResponse);
 			if (toolExecutionResult.returnDirect()) {
 				// Return tool execution result directly to the client.
@@ -287,20 +295,6 @@ public class BedrockProxyChatModel implements ChatModel {
 	@Override
 	public ChatOptions getDefaultOptions() {
 		return this.defaultOptions;
-	}
-
-	Prompt buildRequestPrompt(Prompt prompt) {
-		BedrockChatOptions.Builder requestBuilder = this.defaultOptions.mutate();
-
-		if (prompt.getOptions() != null) {
-			requestBuilder.combineWith(prompt.getOptions().mutate());
-		}
-
-		BedrockChatOptions requestOptions = requestBuilder.build();
-
-		ToolCallingChatOptions.validateToolCallbacks(requestOptions.getToolCallbacks());
-
-		return prompt.mutate().chatOptions(requestOptions).build();
 	}
 
 	ConverseRequest createRequest(Prompt prompt) {
@@ -496,8 +490,10 @@ public class BedrockProxyChatModel implements ChatModel {
 			.topP(updatedRuntimeOptions.getTopP() != null ? updatedRuntimeOptions.getTopP().floatValue() : null)
 			.build();
 
+		BedrockChatOptions bedrockOptions = (BedrockChatOptions) prompt.getOptions();
+		Assert.notNull(bedrockOptions, "options can't be null here");
 		Document additionalModelRequestFields = ConverseApiUtils
-			.getChatOptionsAdditionalModelRequestFields(this.defaultOptions, prompt.getOptions());
+			.convertObjectToDocument(bedrockOptions.getRequestParameters());
 
 		Map<String, String> requestMetadata = ConverseApiUtils
 			.getRequestMetadata(prompt.getUserMessage().getMetadata());
@@ -790,6 +786,7 @@ public class BedrockProxyChatModel implements ChatModel {
 			ChatModelObservationContext observationContext = ChatModelObservationContext.builder()
 				.prompt(prompt)
 				.provider(AiProvider.BEDROCK_CONVERSE.value())
+				.streaming(true)
 				.build();
 
 			Observation observation = ChatModelObservationDocumentation.CHAT_MODEL_OPERATION.observation(
@@ -821,7 +818,7 @@ public class BedrockProxyChatModel implements ChatModel {
 			ChatOptions options = prompt.getOptions();
 			Assert.state(options != null, "Prompt options must not be null");
 
-			Flux<ChatResponse> chatResponseFlux = chatResponses.switchMap(chatResponse -> {
+			Flux<ChatResponse> chatResponseFlux = chatResponses.concatMap(chatResponse -> {
 
 				if (this.toolExecutionEligibilityPredicate.isToolExecutionRequired(options, chatResponse)
 						&& chatResponse.hasFinishReasons(Set.of(StopReason.TOOL_USE.toString()))) {
@@ -831,6 +828,11 @@ public class BedrockProxyChatModel implements ChatModel {
 					return Flux.deferContextual(ctx -> {
 						ToolExecutionResult toolExecutionResult;
 						try {
+							if (this.internalToolExecutionWarned.compareAndSet(false, true)) {
+								logger.warn(
+										"Internal tool execution in BedrockProxyChatModel is deprecated since 2.0.0 and will be removed in 3.0.0. "
+												+ "Use ChatClient with ToolCallAdvisor instead.");
+							}
 							ToolCallReactiveContextHolder.setContext(ctx);
 							toolExecutionResult = this.toolCallingManager.executeToolCalls(prompt, chatResponse);
 						}
@@ -917,11 +919,31 @@ public class BedrockProxyChatModel implements ChatModel {
 			}
 		}
 
+		/**
+		 * Sets the tool calling manager used for internal tool execution.
+		 * @param toolCallingManager the tool calling manager
+		 * @return this builder
+		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
+		 * {@link BedrockProxyChatModel} is superseded by
+		 * {@link org.springframework.ai.chat.client.advisor.ToolCallAdvisor} used via
+		 * {@link org.springframework.ai.chat.client.ChatClient}.
+		 */
+		@Deprecated(since = "2.0.0", forRemoval = true)
 		public Builder toolCallingManager(ToolCallingManager toolCallingManager) {
 			this.toolCallingManager = toolCallingManager;
 			return this;
 		}
 
+		/**
+		 * Sets the predicate to determine tool execution eligibility.
+		 * @param toolExecutionEligibilityPredicate the predicate
+		 * @return this builder
+		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
+		 * {@link BedrockProxyChatModel} is superseded by
+		 * {@link org.springframework.ai.chat.client.advisor.ToolCallAdvisor} used via
+		 * {@link org.springframework.ai.chat.client.ChatClient}.
+		 */
+		@Deprecated(since = "2.0.0", forRemoval = true)
 		public Builder toolExecutionEligibilityPredicate(
 				ToolExecutionEligibilityPredicate toolExecutionEligibilityPredicate) {
 			this.toolExecutionEligibilityPredicate = toolExecutionEligibilityPredicate;
@@ -988,12 +1010,12 @@ public class BedrockProxyChatModel implements ChatModel {
 			return this;
 		}
 
-		public Builder bedrockRuntimeClient(BedrockRuntimeClient bedrockRuntimeClient) {
+		public Builder bedrockRuntimeClient(@Nullable BedrockRuntimeClient bedrockRuntimeClient) {
 			this.bedrockRuntimeClient = bedrockRuntimeClient;
 			return this;
 		}
 
-		public Builder bedrockRuntimeAsyncClient(BedrockRuntimeAsyncClient bedrockRuntimeAsyncClient) {
+		public Builder bedrockRuntimeAsyncClient(@Nullable BedrockRuntimeAsyncClient bedrockRuntimeAsyncClient) {
 			this.bedrockRuntimeAsyncClient = bedrockRuntimeAsyncClient;
 			return this;
 		}

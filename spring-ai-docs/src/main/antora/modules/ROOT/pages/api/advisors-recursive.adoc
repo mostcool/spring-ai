@@ -33,7 +33,7 @@ The `ToolCallAdvisor` implements the tool calling loop as part of the advisor ch
 
 Key features:
 
-* Disables the model's internal tool execution by setting `setInternalToolExecutionEnabled(false)`
+* Disables the model's internal tool execution by setting `internalToolExecutionEnabled(false)`
 * Loops through the advisor chain until no more tool calls are present
 * Supports "return direct" functionality - when a tool execution has `returnDirect=true`, it interrupts the tool calling loop and returns the tool execution result directly to the client application instead of sending it back to the LLM
 * Uses `callAdvisorChain.copy(this)` to create a sub-chain for recursive calls
@@ -85,6 +85,28 @@ var chatClient = ChatClient.builder(chatModel)
     .defaultAdvisors(chatMemoryAdvisor, toolCallAdvisor)
     .build();
 ----
+
+==== Streaming Intermediate Tool-Call Responses
+
+By default, only the final LLM answer is emitted when using `.stream()` — chunks from intermediate tool-call iterations are suppressed until the last iteration finishes.
+Set `streamToolCallResponses(true)` on the builder to stream each iteration's chunks in real time as they arrive:
+
+[source,java]
+----
+var toolCallAdvisor = ToolCallAdvisor.builder()
+    .toolCallingManager(toolCallingManager)
+    .streamToolCallResponses(true)
+    .build();
+----
+
+When using Spring Boot auto-configuration, set the equivalent property instead:
+
+[source,properties]
+----
+spring.ai.chat.client.tool-calling.stream-tool-call-responses=true
+----
+
+NOTE: Enabling this option increases the number of chunks the client receives but may interleave tool-call fragments with the final answer depending on how the client processes the stream.
 
 ==== Return Direct Functionality
 

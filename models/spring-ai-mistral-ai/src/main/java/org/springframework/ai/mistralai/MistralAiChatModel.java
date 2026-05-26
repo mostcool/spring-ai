@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 import io.micrometer.observation.Observation;
@@ -31,7 +32,6 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -63,7 +63,6 @@ import org.springframework.ai.mistralai.api.MistralAiApi.ChatCompletionMessage.T
 import org.springframework.ai.mistralai.api.MistralAiApi.ChatCompletionRequest;
 import org.springframework.ai.model.ModelOptionsUtils;
 import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionEligibilityPredicate;
 import org.springframework.ai.model.tool.ToolExecutionResult;
@@ -89,6 +88,7 @@ import org.springframework.util.MimeType;
  * @author Alexandros Pappas
  * @author Nicolas Krier
  * @author Jason Smith
+ * @author Sebastien Deleuze
  * @since 1.0.0
  */
 public class MistralAiChatModel implements ChatModel {
@@ -123,6 +123,8 @@ public class MistralAiChatModel implements ChatModel {
 	 * executed.
 	 */
 	private final ToolExecutionEligibilityPredicate toolExecutionEligibilityPredicate;
+
+	private final AtomicBoolean internalToolExecutionWarned = new AtomicBoolean(false);
 
 	/**
 	 * Conventions to use for generating observations.
@@ -230,6 +232,11 @@ public class MistralAiChatModel implements ChatModel {
 
 		ChatOptions options = Objects.requireNonNull(prompt.getOptions());
 		if (this.toolExecutionEligibilityPredicate.isToolExecutionRequired(options, response)) {
+			if (this.internalToolExecutionWarned.compareAndSet(false, true)) {
+				logger.warn(
+						"Internal tool execution in MistralAiChatModel is deprecated since 2.0.0 and will be removed in 3.0.0. "
+								+ "Use ChatClient with ToolCallAdvisor instead.");
+			}
 			var toolExecutionResult = this.toolCallingManager.executeToolCalls(prompt, response);
 			if (toolExecutionResult.returnDirect()) {
 				// Return tool execution result directly to the client.
@@ -263,6 +270,7 @@ public class MistralAiChatModel implements ChatModel {
 			ChatModelObservationContext observationContext = ChatModelObservationContext.builder()
 				.prompt(prompt)
 				.provider(MistralAiApi.PROVIDER_NAME)
+				.streaming(true)
 				.build();
 
 			Observation observation = ChatModelObservationDocumentation.CHAT_MODEL_OPERATION.observation(
@@ -280,8 +288,9 @@ public class MistralAiChatModel implements ChatModel {
 
 			// Convert the ChatCompletionChunk into a ChatCompletion to be able to reuse
 			// the function call handling logic.
+			// @formatter:off
 			Flux<ChatResponse> chatResponse = completionChunks.map(this::toChatCompletion)
-				.switchMap(chatCompletion -> Mono.just(chatCompletion).map(chatCompletion2 -> {
+				.map(chatCompletion2 -> {
 					try {
 						@SuppressWarnings("null")
 						String id = chatCompletion2.id();
@@ -313,7 +322,7 @@ public class MistralAiChatModel implements ChatModel {
 						logger.error("Error processing chat completion", e);
 						return new ChatResponse(List.of());
 					}
-				}));
+				});
 
 			// @formatter:off
 			Flux<ChatResponse> chatResponseFlux = chatResponse.flatMap(response -> {
@@ -324,6 +333,11 @@ public class MistralAiChatModel implements ChatModel {
 					return Flux.deferContextual(ctx -> {
 						ToolExecutionResult toolExecutionResult;
 						try {
+							if (this.internalToolExecutionWarned.compareAndSet(false, true)) {
+								logger.warn(
+										"Internal tool execution in MistralAiChatModel is deprecated since 2.0.0 and will be removed in 3.0.0. "
+												+ "Use ChatClient with ToolCallAdvisor instead.");
+							}
 							ToolCallReactiveContextHolder.setContext(ctx);
 							toolExecutionResult = this.toolCallingManager.executeToolCalls(prompt, response);
 						}
@@ -387,20 +401,6 @@ public class MistralAiChatModel implements ChatModel {
 				choices, chunk.usage());
 	}
 
-	Prompt buildRequestPrompt(Prompt prompt) {
-		MistralAiChatOptions.Builder requestBuilder = this.defaultOptions.mutate();
-
-		if (prompt.getOptions() != null) {
-			requestBuilder.combineWith(prompt.getOptions().mutate());
-		}
-
-		MistralAiChatOptions requestOptions = requestBuilder.build();
-
-		ToolCallingChatOptions.validateToolCallbacks(requestOptions.getToolCallbacks());
-
-		return new Prompt(prompt.getInstructions(), requestOptions);
-	}
-
 	/**
 	 * Accessible for testing.
 	 */
@@ -420,8 +420,11 @@ public class MistralAiChatModel implements ChatModel {
 				ModelOptionsUtils.mergeOption(options.getToolChoice(), request.toolChoice()),
 				ModelOptionsUtils.mergeOption(options.getTemperature(), request.temperature()),
 				ModelOptionsUtils.mergeOption(options.getTopP(), request.topP()),
-				ModelOptionsUtils.mergeOption(options.getMaxTokens(), request.maxTokens()), request.stream(),
-				ModelOptionsUtils.mergeOption(options.getSafePrompt(), request.safePrompt()),
+				ModelOptionsUtils.mergeOption(options.getMaxTokens(), request.maxTokens()),
+				ModelOptionsUtils.mergeOption(options.getN(), request.n()),
+				ModelOptionsUtils.mergeOption(options.getPresencePenalty(), request.presencePenalty()),
+				ModelOptionsUtils.mergeOption(options.getFrequencyPenalty(), request.frequencyPenalty()),
+				request.stream(), ModelOptionsUtils.mergeOption(options.getSafePrompt(), request.safePrompt()),
 				ModelOptionsUtils.mergeOption(options.getStop(), request.stop()),
 				ModelOptionsUtils.mergeOption(options.getRandomSeed(), request.randomSeed()),
 				ModelOptionsUtils.mergeOption(options.getResponseFormat(), request.responseFormat()));
@@ -431,7 +434,8 @@ public class MistralAiChatModel implements ChatModel {
 		if (!CollectionUtils.isEmpty(toolDefinitions)) {
 			request = new ChatCompletionRequest(request.model(), request.messages(),
 					this.getFunctionTools(toolDefinitions), request.toolChoice(), request.temperature(), request.topP(),
-					request.maxTokens(), request.stream(), request.safePrompt(), request.stop(), request.randomSeed(),
+					request.maxTokens(), request.n(), request.presencePenalty(), request.frequencyPenalty(),
+					request.stream(), request.safePrompt(), request.stop(), request.randomSeed(),
 					request.responseFormat());
 		}
 
@@ -586,11 +590,31 @@ public class MistralAiChatModel implements ChatModel {
 			return this;
 		}
 
+		/**
+		 * Sets the tool calling manager used for internal tool execution.
+		 * @param toolCallingManager the tool calling manager
+		 * @return this builder
+		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
+		 * {@link MistralAiChatModel} is superseded by
+		 * {@link org.springframework.ai.chat.client.advisor.ToolCallAdvisor} used via
+		 * {@link org.springframework.ai.chat.client.ChatClient}.
+		 */
+		@Deprecated(since = "2.0.0", forRemoval = true)
 		public Builder toolCallingManager(ToolCallingManager toolCallingManager) {
 			this.toolCallingManager = toolCallingManager;
 			return this;
 		}
 
+		/**
+		 * Sets the predicate to determine tool execution eligibility.
+		 * @param toolExecutionEligibilityPredicate the predicate
+		 * @return this builder
+		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
+		 * {@link MistralAiChatModel} is superseded by
+		 * {@link org.springframework.ai.chat.client.advisor.ToolCallAdvisor} used via
+		 * {@link org.springframework.ai.chat.client.ChatClient}.
+		 */
+		@Deprecated(since = "2.0.0", forRemoval = true)
 		public Builder toolExecutionEligibilityPredicate(
 				ToolExecutionEligibilityPredicate toolExecutionEligibilityPredicate) {
 			this.toolExecutionEligibilityPredicate = toolExecutionEligibilityPredicate;
