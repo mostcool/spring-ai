@@ -21,20 +21,31 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.Month;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.annotation.JsonClassDescription;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import io.swagger.v3.oas.annotations.media.Schema;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.ai.util.JacksonUtils;
+import org.springframework.ai.util.JsonHelper;
 import org.springframework.ai.util.json.schema.JsonSchemaGenerator;
-import org.springframework.lang.Nullable;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -46,6 +57,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * @author Christian Tzolov
  */
 class JsonSchemaGeneratorTests {
+
+	private static final JsonHelper jsonHelper = new JsonHelper();
 
 	// METHODS
 
@@ -246,7 +259,7 @@ class JsonSchemaGeneratorTests {
 		String schema = JsonSchemaGenerator.generateForMethodInput(method,
 				JsonSchemaGenerator.SchemaOption.ALLOW_ADDITIONAL_PROPERTIES_BY_DEFAULT);
 
-		JsonNode jsonNode = JsonParser.getJsonMapper().readTree(schema);
+		JsonNode jsonNode = JacksonUtils.getDefaultJsonMapper().readTree(schema);
 		assertThat(jsonNode.has("additionalProperties")).isFalse();
 	}
 
@@ -277,6 +290,44 @@ class JsonSchemaGeneratorTests {
 				""";
 
 		assertThat(schema).isEqualToIgnoringWhitespace(expectedJsonSchema);
+	}
+
+	@Test
+	void generateSchemaForMethodWithUpperCaseTypesInTrLocale() throws Exception {
+		Locale defaultLocale = Locale.getDefault();
+		try {
+			Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+			Method method = TestMethods.class.getDeclaredMethod("simpleMethod", String.class, int.class);
+
+			// The method "convertTypeValuesToUpperCase" will fail to correctly uppercase
+			// STRING and INTEGER in turkish locale, resulting in STRİNG and İNTEGER
+			String schema = JsonSchemaGenerator.generateForMethodInput(method,
+					JsonSchemaGenerator.SchemaOption.UPPER_CASE_TYPE_VALUES);
+			String expectedJsonSchema = """
+					{
+					    "$schema": "https://json-schema.org/draft/2020-12/schema",
+					    "type": "OBJECT",
+					    "properties": {
+					        "name": {
+					            "type": "STRING"
+					        },
+					        "age": {
+					            "type": "INTEGER"
+					        }
+					    },
+					    "required": [
+					        "name",
+					        "age"
+					    ],
+					    "additionalProperties": false
+					}
+					""";
+
+			assertThat(schema).isEqualToIgnoringWhitespace(expectedJsonSchema);
+		}
+		finally {
+			Locale.setDefault(defaultLocale);
+		}
 	}
 
 	@Test
@@ -345,7 +396,7 @@ class JsonSchemaGeneratorTests {
 		String schema = JsonSchemaGenerator.generateForMethodInput(method,
 				JsonSchemaGenerator.SchemaOption.ALLOW_ADDITIONAL_PROPERTIES_BY_DEFAULT);
 
-		JsonNode jsonNode = JsonParser.getJsonMapper().readTree(schema);
+		JsonNode jsonNode = JacksonUtils.getDefaultJsonMapper().readTree(schema);
 		assertThat(jsonNode.has("additionalProperties")).isFalse();
 		assertThat(jsonNode.get("properties").get("data").has("additionalProperties")).isFalse();
 		assertThat(jsonNode.get("properties").get("moreData").has("additionalProperties")).isFalse();
@@ -447,7 +498,7 @@ class JsonSchemaGeneratorTests {
 		String schema = JsonSchemaGenerator.generateForType(Person.class,
 				JsonSchemaGenerator.SchemaOption.ALLOW_ADDITIONAL_PROPERTIES_BY_DEFAULT);
 
-		JsonNode jsonNode = JsonParser.getJsonMapper().readTree(schema);
+		JsonNode jsonNode = JacksonUtils.getDefaultJsonMapper().readTree(schema);
 		assertThat(jsonNode.has("additionalProperties")).isFalse();
 	}
 
@@ -660,7 +711,7 @@ class JsonSchemaGeneratorTests {
 	@Test
 	void generateSchemaForTypeWithMapFieldDoesNotForbidAdditionalProperties() {
 		String schema = JsonSchemaGenerator.generateForType(WithMapField.class);
-		JsonNode jsonNode = JsonParser.getJsonMapper().readTree(schema);
+		JsonNode jsonNode = JacksonUtils.getDefaultJsonMapper().readTree(schema);
 		assertThat(jsonNode.get("additionalProperties").asBoolean())
 			.as("root object schema should have additionalProperties: false")
 			.isFalse();
@@ -752,16 +803,16 @@ class JsonSchemaGeneratorTests {
 		Method method = TestMethods.class.getDeclaredMethod("searchBooksMethod", SearchRequest.class);
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.has("$defs")).as("$defs must be hoisted to the outer schema root").isTrue();
 		assertThat(schemaNode.get("$defs").has("RecursiveFilter")).isTrue();
 		assertThat(schemaNode.at("/properties/request").has("$defs"))
 			.as("$defs must not remain nested inside the parameter sub-schema")
 			.isFalse();
-		assertThat(schemaNode.at("/properties/request/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/request/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
-		assertThat(schemaNode.at("/$defs/RecursiveFilter/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/RecursiveFilter/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
 	}
 
@@ -775,13 +826,13 @@ class JsonSchemaGeneratorTests {
 				SearchRequest.class);
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs").size()).isEqualTo(1);
 		assertThat(schemaNode.at("/$defs").has("RecursiveFilter")).isTrue();
-		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
-		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
 	}
 
@@ -797,7 +848,7 @@ class JsonSchemaGeneratorTests {
 				OuterB.SearchRequest.class);
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs/Filter").has("properties")).isTrue();
 		assertThat(schemaNode.at("/$defs/Filter_2").has("properties")).isTrue();
@@ -807,12 +858,13 @@ class JsonSchemaGeneratorTests {
 		assertThat(schemaNode.at("/$defs/Filter_2/properties").has("code"))
 			.as("second colliding entry retains OuterB.Filter shape (code field)")
 			.isTrue();
-		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asText()).isEqualTo("#/$defs/Filter");
-		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asString()).isEqualTo("#/$defs/Filter");
+		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asString())
 			.as("second parameter's $ref must be rewritten to the renamed entry")
 			.isEqualTo("#/$defs/Filter_2");
-		assertThat(schemaNode.at("/$defs/Filter/properties/children/items/$ref").asText()).isEqualTo("#/$defs/Filter");
-		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Filter/properties/children/items/$ref").asString())
+			.isEqualTo("#/$defs/Filter");
+		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asString())
 			.as("self-reference inside the renamed entry must follow the rename")
 			.isEqualTo("#/$defs/Filter_2");
 	}
@@ -827,7 +879,7 @@ class JsonSchemaGeneratorTests {
 				PeerB.SearchRequest.class);
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs/Filter/properties").has("label")).as("first definition keeps PeerA shape")
 			.isTrue();
@@ -835,13 +887,13 @@ class JsonSchemaGeneratorTests {
 			.as("colliding definition is renamed with PeerB shape")
 			.isTrue();
 		assertThat(schemaNode.at("/$defs/Wrapper").has("properties")).isTrue();
-		assertThat(schemaNode.at("/$defs/Wrapper/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Wrapper/properties/filters/items/$ref").asString())
 			.as("peer Wrapper's $ref to the colliding name must be rewritten to the renamed entry")
 			.isEqualTo("#/$defs/Filter_2");
-		assertThat(schemaNode.at("/$defs/Wrapper/properties/nested/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Wrapper/properties/nested/items/$ref").asString())
 			.as("peer Wrapper's self-reference must be left alone")
 			.isEqualTo("#/$defs/Wrapper");
-		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asString())
 			.as("renamed entry's self-reference must follow the rename")
 			.isEqualTo("#/$defs/Filter_2");
 	}
@@ -854,7 +906,7 @@ class JsonSchemaGeneratorTests {
 		Method method = TestMethods.class.getDeclaredMethod("searchBooksMethod", SearchRequest.class);
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs/RecursiveFilter/additionalProperties").asBoolean(true))
 			.as("additionalProperties: false must be propagated into hoisted $defs entries")
@@ -869,7 +921,7 @@ class JsonSchemaGeneratorTests {
 
 		String schema = JsonSchemaGenerator.generateForMethodInput(method,
 				JsonSchemaGenerator.SchemaOption.ALLOW_ADDITIONAL_PROPERTIES_BY_DEFAULT);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.has("$defs")).isTrue();
 		assertThat(schemaNode.at("/$defs/RecursiveFilter").has("additionalProperties"))
@@ -881,9 +933,52 @@ class JsonSchemaGeneratorTests {
 	}
 
 	@Test
+	void generateSchemaForTypeCanRunConcurrently() throws Exception {
+		List<String> schemas = generateConcurrently(() -> JsonSchemaGenerator.generateForType(OrderedStatement.class));
+
+		assertThat(schemas).hasSize(240);
+		assertThat(schemas).allSatisfy(schema -> assertThat(schema).contains("\"properties\""));
+	}
+
+	@Test
+	void generateSchemaForMethodInputCanRunConcurrently() throws Exception {
+		Method method = TestMethods.class.getDeclaredMethod("searchBooksMethod", SearchRequest.class);
+
+		List<String> schemas = generateConcurrently(() -> JsonSchemaGenerator.generateForMethodInput(method));
+
+		assertThat(schemas).hasSize(240);
+		assertThat(schemas).allSatisfy(schema -> assertThat(schema).contains("\"$defs\""));
+	}
+
+	@Test
 	void throwExceptionWhenTypeIsNull() {
 		assertThatThrownBy(() -> JsonSchemaGenerator.generateForType(null)).isInstanceOf(IllegalArgumentException.class)
 			.hasMessage("type cannot be null");
+	}
+
+	private static List<String> generateConcurrently(Callable<String> generator) throws Exception {
+		int threadCount = 12;
+		int callCount = 240;
+		ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+		CountDownLatch start = new CountDownLatch(1);
+		try {
+			List<Future<String>> futures = new ArrayList<>();
+			for (int i = 0; i < callCount; i++) {
+				futures.add(executor.submit(() -> {
+					start.await();
+					return generator.call();
+				}));
+			}
+			start.countDown();
+			List<String> schemas = new ArrayList<>();
+			for (Future<String> future : futures) {
+				schemas.add(future.get(30, TimeUnit.SECONDS));
+			}
+			return schemas;
+		}
+		finally {
+			executor.shutdownNow();
+		}
 	}
 
 	static class TestMethods {
@@ -1018,12 +1113,17 @@ class JsonSchemaGeneratorTests {
 
 	}
 
-	record JSpecifyNullablePerson(int id, String name, @org.jspecify.annotations.Nullable String email) {
+	record JSpecifyNullablePerson(int id, String name, @Nullable String email) {
 
 	}
 
 	record WithMapField(String name, Map<String, Integer> scores) {
 
+	}
+
+	@JsonPropertyOrder({ "accountId", "accountName", "currency", "totals" })
+	record OrderedStatement(@JsonProperty(required = true) String accountId,
+			@JsonProperty(required = true) String accountName, String currency, Map<String, Double> totals) {
 	}
 
 	static class Person {

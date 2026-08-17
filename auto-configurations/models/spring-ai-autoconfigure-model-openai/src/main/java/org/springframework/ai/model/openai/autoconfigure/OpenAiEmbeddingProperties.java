@@ -16,6 +16,8 @@
 
 package org.springframework.ai.model.openai.autoconfigure;
 
+import java.util.Map;
+
 import org.jspecify.annotations.Nullable;
 
 import org.springframework.ai.document.MetadataMode;
@@ -24,22 +26,27 @@ import org.springframework.ai.openai.OpenAiEmbeddingOptions.EncodingFormat;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.DeprecatedConfigurationProperty;
 
+/**
+ * OpenAI SDK Embedding autoconfiguration properties.
+ *
+ * @author guan xu
+ */
 @ConfigurationProperties(OpenAiEmbeddingProperties.CONFIG_PREFIX)
 public class OpenAiEmbeddingProperties extends AbstractOpenAiProperties {
 
 	public static final String CONFIG_PREFIX = "spring.ai.openai.embedding";
 
-	public static final String DEFAULT_EMBEDDING_MODEL = OpenAiEmbeddingOptions.DEFAULT_EMBEDDING_MODEL;
-
 	private MetadataMode metadataMode = MetadataMode.EMBED;
 
-	private @Nullable String model = DEFAULT_EMBEDDING_MODEL;
+	private @Nullable String model;
 
 	private @Nullable String user;
 
 	private @Nullable EncodingFormat encodingFormat;
 
 	private @Nullable Integer dimensions;
+
+	private @Nullable Map<String, Object> extraBody;
 
 	public MetadataMode getMetadataMode() {
 		return this.metadataMode;
@@ -81,21 +88,22 @@ public class OpenAiEmbeddingProperties extends AbstractOpenAiProperties {
 		this.dimensions = dimensions;
 	}
 
+	public @Nullable Map<String, Object> getExtraBody() {
+		return this.extraBody;
+	}
+
+	public void setExtraBody(@Nullable Map<String, Object> extraBody) {
+		this.extraBody = extraBody;
+	}
+
 	public OpenAiEmbeddingOptions toOptions() {
-		OpenAiEmbeddingOptions.Builder builder = OpenAiEmbeddingOptions.builder();
-		if (this.getModel() != null) {
-			builder.model(this.getModel());
-		}
-		if (this.user != null) {
-			builder.user(this.user);
-		}
-		if (this.encodingFormat != null) {
-			builder.encodingFormat(this.encodingFormat);
-		}
-		if (this.dimensions != null) {
-			builder.dimensions(this.dimensions);
-		}
-		return builder.build();
+		return OpenAiEmbeddingOptions.builder()
+			.model(this.model)
+			.user(this.user)
+			.encodingFormat(this.encodingFormat)
+			.dimensions(this.dimensions)
+			.extraBody(this.extraBody)
+			.build();
 	}
 
 	private Options options = new Options();
@@ -150,6 +158,16 @@ public class OpenAiEmbeddingProperties extends AbstractOpenAiProperties {
 
 		public void setDimensions(@Nullable Integer dimensions) {
 			OpenAiEmbeddingProperties.this.setDimensions(dimensions);
+		}
+
+		@DeprecatedConfigurationProperty(replacement = "spring.ai.openai.embedding.extra-body")
+		@Deprecated(since = "2.0.0", forRemoval = true)
+		public @Nullable Map<String, Object> getExtraBody() {
+			return OpenAiEmbeddingProperties.this.getExtraBody();
+		}
+
+		public void setExtraBody(@Nullable Map<String, Object> extraBody) {
+			OpenAiEmbeddingProperties.this.setExtraBody(extraBody);
 		}
 
 	}

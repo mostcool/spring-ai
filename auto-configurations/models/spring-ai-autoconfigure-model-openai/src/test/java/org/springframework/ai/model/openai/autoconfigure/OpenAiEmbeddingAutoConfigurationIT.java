@@ -30,13 +30,16 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
+ * Integration tests for {@link OpenAiEmbeddingAutoConfiguration}.
+ *
  * @author Sebastien Deleuze
+ * @author guan xu
  */
 @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
 public class OpenAiEmbeddingAutoConfigurationIT {
 
 	private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-		.withPropertyValues("spring.ai.openai.apiKey=" + System.getenv("OPENAI_API_KEY"));
+		.withPropertyValues("spring.ai.openai.api-key=" + System.getenv("OPENAI_API_KEY"));
 
 	@Test
 	void embedding() {
@@ -95,7 +98,7 @@ public class OpenAiEmbeddingAutoConfigurationIT {
 				"spring.ai.openai.base-url=http://TEST.BASE.URL",
 
 				"spring.ai.openai.embedding.options.model=MODEL_XYZ",
-				"spring.ai.openai.embedding.options.encodingFormat=float",
+				"spring.ai.openai.embedding.options.encoding-format=float",
 				"spring.ai.openai.embedding.options.user=userXYZ"
 				)
 			// @formatter:on
@@ -107,10 +110,40 @@ public class OpenAiEmbeddingAutoConfigurationIT {
 				assertThat(commonProperties.getBaseUrl()).isEqualTo("http://TEST.BASE.URL");
 				assertThat(commonProperties.getApiKey()).isEqualTo("API_KEY");
 
-				assertThat(embeddingProperties.getOptions().getModel()).isEqualTo("MODEL_XYZ");
-				assertThat(embeddingProperties.getOptions().getUser()).isEqualTo("userXYZ");
-				assertThat(embeddingProperties.getOptions().getEncodingFormat())
+				assertThat(embeddingProperties.getModel()).isEqualTo("MODEL_XYZ");
+				assertThat(embeddingProperties.getUser()).isEqualTo("userXYZ");
+				assertThat(embeddingProperties.getEncodingFormat())
 					.isEqualTo(OpenAiEmbeddingOptions.EncodingFormat.FLOAT);
+			});
+	}
+
+	@Test
+	void embeddingExtraBodyTest() {
+
+		this.contextRunner
+			.withPropertyValues(// @formatter:off
+				"spring.ai.openai.api-key=API_KEY",
+				"spring.ai.openai.base-url=http://TEST.BASE.URL",
+
+				"spring.ai.openai.embedding.extra-body.key1=value1",
+				"spring.ai.openai.embedding.extra-body.key2=123",
+				"spring.ai.openai.embedding.extra-body.nested.key3=true"
+			)
+			// @formatter:on
+			.withConfiguration(AutoConfigurations.of(OpenAiEmbeddingAutoConfiguration.class))
+			.run(context -> {
+				var embeddingProperties = context.getBean(OpenAiEmbeddingProperties.class);
+
+				assertThat(embeddingProperties.getExtraBody()).isNotNull();
+				assertThat(embeddingProperties.getExtraBody()).containsEntry("key1", "value1");
+				assertThat(embeddingProperties.getExtraBody()).containsEntry("key2", "123");
+				assertThat(embeddingProperties.getExtraBody()).containsKey("nested");
+
+				var options = embeddingProperties.toOptions();
+				assertThat(options.getExtraBody()).isNotNull();
+				assertThat(options.getExtraBody()).containsEntry("key1", "value1");
+				assertThat(options.getExtraBody()).containsEntry("key2", "123");
+				assertThat(options.getExtraBody()).containsKey("nested");
 			});
 	}
 

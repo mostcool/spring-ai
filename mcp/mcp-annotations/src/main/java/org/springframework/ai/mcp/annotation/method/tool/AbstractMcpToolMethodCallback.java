@@ -19,6 +19,7 @@ package org.springframework.ai.mcp.annotation.method.tool;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Type;
+import java.lang.reflect.UndeclaredThrowableException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
@@ -26,6 +27,7 @@ import java.util.stream.Stream;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.spec.McpSchema.CallToolRequest;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
+import org.jspecify.annotations.Nullable;
 
 import org.springframework.ai.mcp.annotation.McpMeta;
 import org.springframework.ai.mcp.annotation.McpProgressToken;
@@ -33,7 +35,7 @@ import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.context.McpAsyncRequestContext;
 import org.springframework.ai.mcp.annotation.context.McpRequestContextTypes;
 import org.springframework.ai.mcp.annotation.context.McpSyncRequestContext;
-import org.springframework.ai.util.json.JsonParser;
+import org.springframework.ai.util.JsonHelper;
 
 /**
  * Abstract base class for creating Function callbacks around tool methods.
@@ -47,6 +49,8 @@ import org.springframework.ai.util.json.JsonParser;
  * @author Christian Tzolov
  */
 public abstract class AbstractMcpToolMethodCallback<T, RC extends McpRequestContextTypes<?>> {
+
+	private static final JsonHelper jsonHelper = new JsonHelper();
 
 	protected final Method toolMethod;
 
@@ -69,18 +73,22 @@ public abstract class AbstractMcpToolMethodCallback<T, RC extends McpRequestCont
 	 */
 	protected Object callMethod(Object[] methodArguments) {
 		this.toolMethod.setAccessible(true);
-
-		Object result;
 		try {
-			result = this.toolMethod.invoke(this.toolObject, methodArguments);
+			return this.toolMethod.invoke(this.toolObject, methodArguments);
 		}
 		catch (IllegalAccessException ex) {
 			throw new RuntimeException("Failed to access tool method", ex);
 		}
 		catch (InvocationTargetException ex) {
-			throw new RuntimeException("Error invoking method: " + this.toolMethod.getName(), ex.getCause());
+			Throwable cause = ex.getCause();
+			if (cause instanceof RuntimeException re) {
+				throw re;
+			}
+			if (cause instanceof Error err) {
+				throw err;
+			}
+			throw new UndeclaredThrowableException(cause);
 		}
-		return result;
 	}
 
 	/**
@@ -139,18 +147,18 @@ public abstract class AbstractMcpToolMethodCallback<T, RC extends McpRequestCont
 	 * @param type The target type
 	 * @return The typed argument
 	 */
-	protected Object buildTypedArgument(Object value, Type type) {
+	protected Object buildTypedArgument(@Nullable Object value, Type type) {
 		if (value == null) {
 			return null;
 		}
 
 		if (type instanceof Class<?>) {
-			return JsonParser.toTypedObject(value, (Class<?>) type);
+			return jsonHelper.convertToTypedObject(value, (Class<?>) type);
 		}
 
 		// For generic types, use the fromJson method that accepts Type
-		String json = JsonParser.toJson(value);
-		return JsonParser.fromJson(json, type);
+		String json = jsonHelper.toJson(value, true);
+		return jsonHelper.fromJson(json, type);
 	}
 
 	/**
@@ -169,12 +177,12 @@ public abstract class AbstractMcpToolMethodCallback<T, RC extends McpRequestCont
 		Type returnType = this.toolMethod.getGenericReturnType();
 
 		if (this.returnMode == ReturnMode.VOID || returnType == Void.TYPE || returnType == void.class) {
-			return CallToolResult.builder().addTextContent(JsonParser.toJson("Done")).build();
+			return CallToolResult.builder().addTextContent(jsonHelper.toJson("Done")).build();
 		}
 
 		if (this.returnMode == ReturnMode.STRUCTURED) {
-			String jsonOutput = JsonParser.toJson(result);
-			Object structuredOutput = JsonParser.fromJson(jsonOutput, Object.class);
+			String jsonOutput = jsonHelper.toJson(result);
+			Object structuredOutput = jsonHelper.fromJson(jsonOutput, Object.class);
 			return CallToolResult.builder().structuredContent(structuredOutput).build();
 		}
 
@@ -190,7 +198,7 @@ public abstract class AbstractMcpToolMethodCallback<T, RC extends McpRequestCont
 		}
 
 		// For other types, serialize to JSON
-		return CallToolResult.builder().addTextContent(JsonParser.toJson(result)).build();
+		return CallToolResult.builder().addTextContent(jsonHelper.toJson(result)).build();
 	}
 
 	/**

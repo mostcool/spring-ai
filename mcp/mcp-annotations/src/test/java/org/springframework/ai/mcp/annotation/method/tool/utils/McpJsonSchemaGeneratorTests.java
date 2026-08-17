@@ -22,7 +22,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
-import org.springframework.ai.util.json.JsonParser;
+import org.springframework.ai.util.JsonHelper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -31,6 +31,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Unit tests for {@link McpJsonSchemaGenerator}.
  */
 class McpJsonSchemaGeneratorTests {
+
+	private static final JsonHelper jsonHelper = new JsonHelper();
 
 	// gh-5888: when a method parameter type transitively contains a recursive type,
 	// victools emits $defs nested inside the parameter sub-schema while $ref values
@@ -42,16 +44,16 @@ class McpJsonSchemaGeneratorTests {
 		Method method = TestMethods.class.getDeclaredMethod("searchBooksMethod", SearchRequest.class);
 
 		String schema = McpJsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.has("$defs")).as("$defs must be hoisted to the outer schema root").isTrue();
 		assertThat(schemaNode.get("$defs").has("RecursiveFilter")).isTrue();
 		assertThat(schemaNode.at("/properties/request").has("$defs"))
 			.as("$defs must not remain nested inside the parameter sub-schema")
 			.isFalse();
-		assertThat(schemaNode.at("/properties/request/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/request/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
-		assertThat(schemaNode.at("/$defs/RecursiveFilter/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/RecursiveFilter/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
 	}
 
@@ -65,13 +67,13 @@ class McpJsonSchemaGeneratorTests {
 				SearchRequest.class);
 
 		String schema = McpJsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs").size()).isEqualTo(1);
 		assertThat(schemaNode.at("/$defs").has("RecursiveFilter")).isTrue();
-		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
-		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/RecursiveFilter");
 	}
 
@@ -87,16 +89,18 @@ class McpJsonSchemaGeneratorTests {
 				OuterB.SearchRequest.class);
 
 		String schema = McpJsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs/Filter").has("properties")).isTrue();
 		assertThat(schemaNode.at("/$defs/Filter_2").has("properties")).isTrue();
 		assertThat(schemaNode.at("/$defs/Filter/properties").has("label")).isTrue();
 		assertThat(schemaNode.at("/$defs/Filter_2/properties").has("code")).isTrue();
-		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asText()).isEqualTo("#/$defs/Filter");
-		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asText()).isEqualTo("#/$defs/Filter_2");
-		assertThat(schemaNode.at("/$defs/Filter/properties/children/items/$ref").asText()).isEqualTo("#/$defs/Filter");
-		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asText())
+		assertThat(schemaNode.at("/properties/a/properties/filters/items/$ref").asString()).isEqualTo("#/$defs/Filter");
+		assertThat(schemaNode.at("/properties/b/properties/filters/items/$ref").asString())
+			.isEqualTo("#/$defs/Filter_2");
+		assertThat(schemaNode.at("/$defs/Filter/properties/children/items/$ref").asString())
+			.isEqualTo("#/$defs/Filter");
+		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asString())
 			.isEqualTo("#/$defs/Filter_2");
 	}
 
@@ -109,15 +113,16 @@ class McpJsonSchemaGeneratorTests {
 				PeerB.SearchRequest.class);
 
 		String schema = McpJsonSchemaGenerator.generateForMethodInput(method);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
 		assertThat(schemaNode.at("/$defs/Filter/properties").has("label")).isTrue();
 		assertThat(schemaNode.at("/$defs/Filter_2/properties").has("code")).isTrue();
 		assertThat(schemaNode.at("/$defs/Wrapper").has("properties")).isTrue();
-		assertThat(schemaNode.at("/$defs/Wrapper/properties/filters/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Wrapper/properties/filters/items/$ref").asString())
 			.isEqualTo("#/$defs/Filter_2");
-		assertThat(schemaNode.at("/$defs/Wrapper/properties/nested/items/$ref").asText()).isEqualTo("#/$defs/Wrapper");
-		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asText())
+		assertThat(schemaNode.at("/$defs/Wrapper/properties/nested/items/$ref").asString())
+			.isEqualTo("#/$defs/Wrapper");
+		assertThat(schemaNode.at("/$defs/Filter_2/properties/children/items/$ref").asString())
 			.isEqualTo("#/$defs/Filter_2");
 	}
 
@@ -131,18 +136,18 @@ class McpJsonSchemaGeneratorTests {
 	@Test
 	void generateFromClassProducesValidObjectSchema() {
 		String schema = McpJsonSchemaGenerator.generateFromClass(SearchRequest.class);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
-		assertThat(schemaNode.get("type").asText()).isEqualTo("object");
+		assertThat(schemaNode.get("type").asString()).isEqualTo("object");
 		assertThat(schemaNode.has("properties")).isTrue();
 	}
 
 	@Test
 	void generateFromTypeProducesValidObjectSchema() {
 		String schema = McpJsonSchemaGenerator.generateFromType(SearchRequest.class);
-		JsonNode schemaNode = JsonParser.fromJson(schema, JsonNode.class);
+		JsonNode schemaNode = jsonHelper.fromJson(schema, JsonNode.class);
 
-		assertThat(schemaNode.get("type").asText()).isEqualTo("object");
+		assertThat(schemaNode.get("type").asString()).isEqualTo("object");
 		assertThat(schemaNode.has("properties")).isTrue();
 	}
 

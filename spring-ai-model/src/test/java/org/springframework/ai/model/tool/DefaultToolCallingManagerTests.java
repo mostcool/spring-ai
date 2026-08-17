@@ -17,10 +17,14 @@
 package org.springframework.ai.model.tool;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
 import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.observation.ObservationView;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -38,10 +42,12 @@ import org.springframework.ai.tool.execution.ToolExecutionException;
 import org.springframework.ai.tool.execution.ToolExecutionExceptionProcessor;
 import org.springframework.ai.tool.metadata.ToolMetadata;
 import org.springframework.ai.tool.method.MethodToolCallback;
+import org.springframework.ai.tool.observation.ToolCallingObservationContext;
 import org.springframework.ai.tool.resolution.StaticToolCallbackResolver;
 import org.springframework.ai.tool.resolution.ToolCallbackResolver;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
@@ -102,28 +108,12 @@ class DefaultToolCallingManagerTests {
 	@Test
 	void whenToolCallbackExistsThenResolve() {
 		ToolCallback toolCallback = new TestToolCallback("toolA");
-		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
-		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
-			.toolCallbackResolver(toolCallbackResolver)
-			.build();
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder().build();
 
 		List<ToolDefinition> toolDefinitions = toolCallingManager
-			.resolveToolDefinitions(ToolCallingChatOptions.builder().toolNames("toolA").build());
+			.resolveToolDefinitions(ToolCallingChatOptions.builder().toolCallbacks(toolCallback).build());
 
 		assertThat(toolDefinitions).containsExactly(toolCallback.getToolDefinition());
-	}
-
-	@Test
-	void whenToolCallbackDoesNotExistThenThrow() {
-		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of());
-		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
-			.toolCallbackResolver(toolCallbackResolver)
-			.build();
-
-		assertThatThrownBy(() -> toolCallingManager
-			.resolveToolDefinitions(ToolCallingChatOptions.builder().toolNames("toolB").build()))
-			.isInstanceOf(IllegalStateException.class)
-			.hasMessage("No ToolCallback found for tool name: toolB");
 	}
 
 	// EXECUTE TOOL CALLS
@@ -241,10 +231,7 @@ class DefaultToolCallingManagerTests {
 		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder().build();
 
 		Prompt prompt = new Prompt(new UserMessage("Hello"),
-				ToolCallingChatOptions.builder()
-					.toolCallbacks(new TestToolCallback("toolA"))
-					.toolNames("toolA")
-					.build());
+				ToolCallingChatOptions.builder().toolCallbacks(new TestToolCallback("toolA")).build());
 		ChatResponse chatResponse = ChatResponse.builder()
 			.generations(List.of(new Generation(AssistantMessage.builder()
 				.content("")
@@ -351,6 +338,53 @@ class DefaultToolCallingManagerTests {
 	}
 
 	@Test
+	void whenBlockingExecutionThenToolCallObservationHasCurrentObservationAsParent() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+
+		ObservationRegistry observationRegistry = ObservationRegistry.create();
+		List<ObservationView> capturedParents = new ArrayList<>();
+		observationRegistry.observationConfig()
+			.observationHandler(new ObservationHandler<ToolCallingObservationContext>() {
+				@Override
+				public void onStart(ToolCallingObservationContext context) {
+					capturedParents.add(context.getParentObservation());
+				}
+
+				@Override
+				public boolean supportsContext(Observation.Context context) {
+					return context instanceof ToolCallingObservationContext;
+				}
+			});
+
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.observationRegistry(observationRegistry)
+			.toolCallbackResolver(toolCallbackResolver)
+			.build();
+
+		Prompt prompt = new Prompt(new UserMessage("Hello"), ToolCallingChatOptions.builder().build());
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		// Simulate the blocking ChatClient flow where an outer observation holds an open
+		// scope on the calling thread (ToolCallReactiveContextHolder is never populated).
+		Observation parentObservation = Observation.start("parent", observationRegistry);
+		try (Observation.Scope ignored = parentObservation.openScope()) {
+			toolCallingManager.executeToolCalls(prompt, chatResponse);
+		}
+		finally {
+			parentObservation.stop();
+		}
+
+		assertThat(capturedParents).containsExactly(parentObservation);
+	}
+
+	@Test
 	void whenMixedMethodToolCallsInChatResponseThenExecute() throws NoSuchMethodException {
 		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder().build();
 
@@ -373,7 +407,6 @@ class DefaultToolCallingManagerTests {
 		Prompt prompt = new Prompt(new UserMessage("Hello"),
 				ToolCallingChatOptions.builder()
 					.toolCallbacks(methodToolCallback, methodToolCallbackNeedToolContext)
-					.toolNames("toolA", "toolB")
 					.toolContext("key", "value")
 					.build());
 
@@ -394,6 +427,374 @@ class DefaultToolCallingManagerTests {
 		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
 
 		assertThat(toolExecutionResult.conversationHistory()).contains(expectedToolResponse);
+	}
+
+	// TOOL CALL LIMITS
+
+	@Test
+	void whenMaxCallsPerToolExceededThenThrowWithPartialResult() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxCallsPerTool("toolA", 1)
+			.build();
+
+		// One prior call to toolA already recorded in the conversation history.
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("priorId", "toolA", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		assertThatExceptionOfType(ToolCallLimitExceededException.class)
+			.isThrownBy(() -> toolCallingManager.executeToolCalls(prompt, chatResponse))
+			.satisfies(ex -> {
+				assertThat(ex.getToolName()).isEqualTo("toolA");
+				assertThat(ex.getLimit()).isEqualTo(1);
+				assertThat(ex.getPartialToolExecutionResult()).isNotNull();
+			});
+	}
+
+	@Test
+	void whenMaxCallsPerToolExceededAndReturnErrorResponseThenSynthesizeErrorResponse() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxCallsPerTool("toolA", 1)
+			.onLimitExceeded(ToolCallLimitBehavior.RETURN_ERROR_RESPONSE)
+			.build();
+
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("priorId", "toolA", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+
+		ToolResponseMessage lastMessage = (ToolResponseMessage) toolExecutionResult.conversationHistory()
+			.get(toolExecutionResult.conversationHistory().size() - 1);
+		assertThat(lastMessage.getResponses()).singleElement().satisfies(response -> {
+			assertThat(response.name()).isEqualTo("toolA");
+			assertThat(response.responseData()).contains("limit").doesNotContain("Mission accomplished!");
+		});
+	}
+
+	@Test
+	void whenToolExcludedFromLimitThenNotCounted() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxCallsPerTool(1)
+			.excludeToolFromLimit("toolA")
+			.build();
+
+		// Several prior calls to toolA already recorded; would normally exceed the
+		// default per-tool limit of 1.
+		ToolResponseMessage priorToolResponses = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("priorId1", "toolA", "Mission accomplished!"),
+					new ToolResponse("priorId2", "toolA", "Mission accomplished!"),
+					new ToolResponse("priorId3", "toolA", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponses),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolResponseMessage expectedToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("toolA", "toolA", "Mission accomplished!")))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+
+		assertThat(toolExecutionResult.conversationHistory()).contains(expectedToolResponse);
+	}
+
+	@Test
+	void whenMaxTotalToolCallsExceededThenThrowRegardlessOfToolName() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxTotalToolCalls(1)
+			.build();
+
+		// One prior call to a different tool (toolB) already recorded.
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("priorId", "toolB", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		assertThatExceptionOfType(ToolCallLimitExceededException.class)
+			.isThrownBy(() -> toolCallingManager.executeToolCalls(prompt, chatResponse))
+			.satisfies(ex -> {
+				assertThat(ex.getToolName()).isNull();
+				assertThat(ex.getLimit()).isEqualTo(1);
+			});
+	}
+
+	@Test
+	void whenBuilderUnconfiguredThenDefaultMaxCallsPerToolApplies() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.build();
+
+		// DefaultToolCallingManager.DEFAULT_MAX_CALLS_PER_TOOL prior calls already
+		// recorded; the next one should breach the baked-in default.
+		List<ToolResponse> priorResponses = new ArrayList<>();
+		for (int i = 0; i < DefaultToolCallingManager.DEFAULT_MAX_CALLS_PER_TOOL; i++) {
+			priorResponses.add(new ToolResponse("priorId" + i, "toolA", "Mission accomplished!"));
+		}
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder().responses(priorResponses).build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		assertThatExceptionOfType(ToolCallLimitExceededException.class)
+			.isThrownBy(() -> toolCallingManager.executeToolCalls(prompt, chatResponse))
+			.satisfies(ex -> {
+				assertThat(ex.getToolName()).isEqualTo("toolA");
+				assertThat(ex.getLimit()).isEqualTo(DefaultToolCallingManager.DEFAULT_MAX_CALLS_PER_TOOL);
+			});
+	}
+
+	@Test
+	void whenBuilderUnconfiguredThenDefaultMaxTotalToolCallsApplies() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.build();
+
+		// DefaultToolCallingManager.DEFAULT_MAX_TOTAL_TOOL_CALLS prior calls to a
+		// different tool already recorded; the next call to any tool should breach
+		// the baked-in total default.
+		List<ToolResponse> priorResponses = new ArrayList<>();
+		for (int i = 0; i < DefaultToolCallingManager.DEFAULT_MAX_TOTAL_TOOL_CALLS; i++) {
+			priorResponses.add(new ToolResponse("priorId" + i, "toolB", "Mission accomplished!"));
+		}
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder().responses(priorResponses).build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		assertThatExceptionOfType(ToolCallLimitExceededException.class)
+			.isThrownBy(() -> toolCallingManager.executeToolCalls(prompt, chatResponse))
+			.satisfies(ex -> {
+				assertThat(ex.getToolName()).isNull();
+				assertThat(ex.getLimit()).isEqualTo(DefaultToolCallingManager.DEFAULT_MAX_TOTAL_TOOL_CALLS);
+			});
+	}
+
+	@Test
+	void whenUnlimitedCallsPerToolThenDefaultLimitIsDisabled() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.unlimitedCallsPerTool()
+			.build();
+
+		// Well beyond DefaultToolCallingManager.DEFAULT_MAX_CALLS_PER_TOOL; should
+		// still succeed since the per-tool limit was explicitly disabled.
+		List<ToolResponse> priorResponses = new ArrayList<>();
+		for (int i = 0; i < DefaultToolCallingManager.DEFAULT_MAX_CALLS_PER_TOOL + 5; i++) {
+			priorResponses.add(new ToolResponse("priorId" + i, "toolA", "Mission accomplished!"));
+		}
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder().responses(priorResponses).build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+		assertThat(toolExecutionResult.conversationHistory()).isNotEmpty();
+	}
+
+	@Test
+	void whenUnlimitedTotalToolCallsThenDefaultLimitIsDisabled() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.unlimitedCallsPerTool()
+			.unlimitedTotalToolCalls()
+			.build();
+
+		// Well beyond DefaultToolCallingManager.DEFAULT_MAX_TOTAL_TOOL_CALLS; should
+		// still succeed since both limits were explicitly disabled.
+		List<ToolResponse> priorResponses = new ArrayList<>();
+		for (int i = 0; i < DefaultToolCallingManager.DEFAULT_MAX_TOTAL_TOOL_CALLS + 5; i++) {
+			priorResponses.add(new ToolResponse("priorId" + i, "toolA", "Mission accomplished!"));
+		}
+		ToolResponseMessage priorToolResponse = ToolResponseMessage.builder().responses(priorResponses).build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Hello"), priorToolResponse),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+		assertThat(toolExecutionResult.conversationHistory()).isNotEmpty();
+	}
+
+	@Test
+	void whenPriorTurnHasToolCallsThenNotCountedTowardCurrentTurnPerToolLimit() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxCallsPerTool("toolA", 1)
+			.build();
+
+		// An earlier turn already made a call to toolA (already at the limit for that
+		// earlier turn), but a new UserMessage starts a fresh turn; only messages from
+		// the last UserMessage onward should count.
+		ToolResponseMessage earlierTurnToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("earlierId", "toolA", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(
+				List.of(new UserMessage("Earlier turn"), earlierTurnToolResponse, new UserMessage("New turn")),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+		assertThat(toolExecutionResult.conversationHistory()).isNotEmpty();
+	}
+
+	@Test
+	void whenPriorTurnHasManyToolCallsThenNotCountedTowardCurrentTurnTotalLimit() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxTotalToolCalls(1)
+			.build();
+
+		// An earlier turn already made many tool calls, well past the total limit,
+		// but a new UserMessage starts a fresh turn whose count should start at zero.
+		List<ToolResponse> earlierTurnResponses = new ArrayList<>();
+		for (int i = 0; i < 10; i++) {
+			earlierTurnResponses.add(new ToolResponse("earlierId" + i, "toolB", "Mission accomplished!"));
+		}
+		ToolResponseMessage earlierTurnToolResponse = ToolResponseMessage.builder()
+			.responses(earlierTurnResponses)
+			.build();
+		Prompt prompt = new Prompt(
+				List.of(new UserMessage("Earlier turn"), earlierTurnToolResponse, new UserMessage("New turn")),
+				ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, chatResponse);
+		assertThat(toolExecutionResult.conversationHistory()).isNotEmpty();
+	}
+
+	@Test
+	void whenCurrentTurnExceedsLimitThenThrowsRegardlessOfPriorTurns() {
+		ToolCallback toolCallback = new TestToolCallback("toolA");
+		ToolCallbackResolver toolCallbackResolver = new StaticToolCallbackResolver(List.of(toolCallback));
+		ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+			.toolCallbackResolver(toolCallbackResolver)
+			.maxCallsPerTool("toolA", 1)
+			.build();
+
+		// An earlier turn's tool response (a different tool, irrelevant to this
+		// check) is followed by a new turn that already made one call to toolA.
+		ToolResponseMessage earlierTurnToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("earlierId", "toolB", "Mission accomplished!")))
+			.build();
+		ToolResponseMessage currentTurnToolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponse("currentId", "toolA", "Mission accomplished!")))
+			.build();
+		Prompt prompt = new Prompt(List.of(new UserMessage("Earlier turn"), earlierTurnToolResponse,
+				new UserMessage("New turn"), currentTurnToolResponse), ToolCallingChatOptions.builder().build());
+
+		ChatResponse chatResponse = ChatResponse.builder()
+			.generations(List.of(new Generation(AssistantMessage.builder()
+				.content("")
+				.properties(Map.of())
+				.toolCalls(List.of(new AssistantMessage.ToolCall("toolA", "function", "toolA", "{}")))
+				.build())))
+			.build();
+
+		assertThatExceptionOfType(ToolCallLimitExceededException.class)
+			.isThrownBy(() -> toolCallingManager.executeToolCalls(prompt, chatResponse))
+			.satisfies(ex -> assertThat(ex.getToolName()).isEqualTo("toolA"));
 	}
 
 	static class TestToolCallback implements ToolCallback {

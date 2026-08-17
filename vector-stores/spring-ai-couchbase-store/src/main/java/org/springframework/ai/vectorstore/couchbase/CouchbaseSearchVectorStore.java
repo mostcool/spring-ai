@@ -35,8 +35,8 @@ import com.couchbase.client.java.manager.query.CreatePrimaryQueryIndexOptions;
 import com.couchbase.client.java.manager.search.SearchIndex;
 import com.couchbase.client.java.query.QueryOptions;
 import com.couchbase.client.java.query.QueryResult;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.RetrySpec;
 
@@ -59,7 +59,7 @@ import org.springframework.util.Assert;
 public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		implements InitializingBean, AutoCloseable {
 
-	private static final Logger logger = LoggerFactory.getLogger(CouchbaseSearchVectorStore.class);
+	private static final Log logger = LogFactory.getLog(CouchbaseSearchVectorStore.class);
 
 	private static final String DEFAULT_INDEX_NAME = "spring-ai-document-index";
 
@@ -164,7 +164,9 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 			this.scope.query(sql, QueryOptions.queryOptions().metrics(true));
 		}
 		catch (Exception e) {
-			logger.error("Failed to delete documents by filter: {}", e.getMessage(), e);
+			if (logger.isErrorEnabled()) {
+				logger.error("Failed to delete documents by filter: " + e.getMessage(), e);
+			}
 			throw new IllegalStateException("Failed to delete documents by filter", e);
 		}
 	}
@@ -407,8 +409,7 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 * @return this builder
 		 */
 		public CouchbaseSearchVectorStore.Builder collectionName(String collectionName) {
-			Assert.notNull(collectionName, "Collection Name must not be null");
-			Assert.notNull(collectionName, "Collection Name must not be empty");
+			Assert.hasText(collectionName, "Collection Name must not be empty");
 			this.collectionName = collectionName;
 			return this;
 		}
@@ -420,8 +421,7 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 * @return this builder
 		 */
 		public CouchbaseSearchVectorStore.Builder scopeName(String scopeName) {
-			Assert.notNull(scopeName, "Scope Name must not be null");
-			Assert.notNull(scopeName, "Scope Name must not be empty");
+			Assert.hasText(scopeName, "Scope Name must not be empty");
 			this.scopeName = scopeName;
 			return this;
 		}
@@ -432,8 +432,7 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 * @return this builder
 		 */
 		public CouchbaseSearchVectorStore.Builder bucketName(String bucketName) {
-			Assert.notNull(bucketName, "Bucket Name must not be null");
-			Assert.notNull(bucketName, "Bucket Name must not be empty");
+			Assert.hasText(bucketName, "Bucket Name must not be empty");
 			this.bucketName = bucketName;
 			return this;
 		}
@@ -445,8 +444,7 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 * @return this builder
 		 */
 		public CouchbaseSearchVectorStore.Builder vectorIndexName(String vectorIndexName) {
-			Assert.notNull(vectorIndexName, "Vector Index Name must not be null");
-			Assert.notNull(vectorIndexName, "Vector Index Name must not be empty");
+			Assert.hasText(vectorIndexName, "Vector Index Name must not be empty");
 			this.vectorIndexName = vectorIndexName;
 			return this;
 		}
@@ -458,7 +456,7 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 */
 		public CouchbaseSearchVectorStore.Builder dimensions(Integer dimensions) {
 			Assert.notNull(dimensions, "Dimensions must not be null");
-			Assert.notNull(dimensions, "Dimensions must not be empty");
+			Assert.isTrue(dimensions > 0, "Dimensions must be greater than 0");
 			this.dimensions = dimensions;
 			return this;
 		}
@@ -471,7 +469,6 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 */
 		public CouchbaseSearchVectorStore.Builder similarityFunction(CouchbaseSimilarityFunction similarityFunction) {
 			Assert.notNull(similarityFunction, "Couchbase Similarity Function must not be null");
-			Assert.notNull(similarityFunction, "Couchbase Similarity Function must not be empty");
 			this.similarityFunction = similarityFunction;
 			return this;
 		}
@@ -483,7 +480,6 @@ public class CouchbaseSearchVectorStore extends AbstractObservationVectorStore
 		 */
 		public CouchbaseSearchVectorStore.Builder indexOptimization(CouchbaseIndexOptimization indexOptimization) {
 			Assert.notNull(indexOptimization, "Index Optimization must not be null");
-			Assert.notNull(indexOptimization, "Index Optimization must not be empty");
 			this.indexOptimization = indexOptimization;
 			return this;
 		}

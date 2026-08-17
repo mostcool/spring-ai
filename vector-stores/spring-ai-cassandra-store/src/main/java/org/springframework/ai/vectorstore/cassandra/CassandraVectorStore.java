@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -63,9 +64,9 @@ import com.datastax.oss.driver.api.querybuilder.select.Select;
 import com.datastax.oss.driver.api.querybuilder.select.Selector;
 import com.datastax.oss.driver.shaded.guava.common.annotations.VisibleForTesting;
 import com.datastax.oss.driver.shaded.guava.common.base.Preconditions;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.springframework.ai.document.Document;
 import org.springframework.ai.document.DocumentMetadata;
@@ -194,7 +195,7 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 
 	public static final String DRIVER_PROFILE_SEARCH = "spring-ai-search";
 
-	private static final Logger logger = LoggerFactory.getLogger(CassandraVectorStore.class);
+	private static final Log logger = LogFactory.getLog(CassandraVectorStore.class);
 
 	private static final Map<Similarity, VectorStoreSimilarityMetric> SIMILARITY_TYPE_MAPPING = Map.of(
 			Similarity.COSINE, VectorStoreSimilarityMetric.COSINE, Similarity.EUCLIDEAN,
@@ -337,7 +338,9 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 				// Then delete those documents by ID
 				List<String> idsToDelete = matchingDocs.stream().map(Document::getId).toList();
 				delete(idsToDelete);
-				logger.debug("Deleted {} documents matching filter expression", idsToDelete.size());
+				if (logger.isDebugEnabled()) {
+					logger.debug("Deleted " + idsToDelete.size() + " documents matching filter expression");
+				}
 			}
 		}
 		catch (Exception e) {
@@ -395,8 +398,10 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 					String.format("Index %s does not exist in table %s", this.schema.index(), this.schema.table));
 		}
 
-		return Similarity
-			.valueOf(indexMetadata.get().getOptions().getOrDefault("similarity_function", "COSINE").toUpperCase());
+		return Similarity.valueOf(indexMetadata.get()
+			.getOptions()
+			.getOrDefault("similarity_function", "COSINE")
+			.toUpperCase(Locale.ROOT));
 
 	}
 
@@ -448,9 +453,8 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 	}
 
 	private String createSimilaritySearchCql(SearchRequest request, CqlVector<Float> cqlVector, int topK) {
-
 		Select stmt = QueryBuilder.selectFrom(this.schema.keyspace(), this.schema.table())
-			.function("similarity_" + this.similarity.toString().toLowerCase(),
+			.function("similarity_" + this.similarity.toString().toLowerCase(Locale.ROOT),
 					Selector.column(this.schema.embedding()), QueryBuilder.literal(cqlVector));
 
 		for (var c : this.schema.partitionKeys()) {
@@ -588,7 +592,9 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 			.andColumn(this.schema.embedding)
 			.build();
 
-		logger.debug("Executing {}", indexStmt.getQuery());
+		if (logger.isDebugEnabled()) {
+			logger.debug("Executing " + indexStmt.getQuery());
+		}
 		this.session.execute(indexStmt);
 
 		Stream
@@ -604,7 +610,9 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 					.andColumn(metadata.name())
 					.build();
 
-				logger.debug("Executing {}", indexStatement.getQuery());
+				if (logger.isDebugEnabled()) {
+					logger.debug("Executing " + indexStatement.getQuery());
+				}
 				this.session.execute(indexStatement);
 			});
 	}
@@ -633,7 +641,9 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 				createTable = createTable.withColumn(metadata.name(), metadata.type());
 			}
 
-			logger.debug("Executing {}", createTable.asCql());
+			if (logger.isDebugEnabled()) {
+				logger.debug("Executing " + createTable.asCql());
+			}
 			this.session.execute(createTable.build());
 		}
 	}
@@ -676,7 +686,9 @@ public class CassandraVectorStore extends AbstractObservationVectorStore impleme
 						DataTypes.vectorOf(DataTypes.FLOAT, vectorDimension));
 			}
 			SimpleStatement stmt = ((AlterTableAddColumnEnd) alterTable).build();
-			logger.debug("Executing {}", stmt.getQuery());
+			if (logger.isDebugEnabled()) {
+				logger.debug("Executing " + stmt.getQuery());
+			}
 			this.session.execute(stmt);
 		}
 	}

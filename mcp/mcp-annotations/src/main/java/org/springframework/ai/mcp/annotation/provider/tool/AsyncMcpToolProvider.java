@@ -28,8 +28,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.McpSchema.CallToolRequest;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.util.Utils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import reactor.core.publisher.Mono;
 
 import org.springframework.ai.mcp.annotation.McpTool;
@@ -49,7 +49,7 @@ import org.springframework.util.ClassUtils;
  */
 public class AsyncMcpToolProvider extends AbstractMcpToolProvider {
 
-	private static final Logger logger = LoggerFactory.getLogger(AsyncMcpToolProvider.class);
+	private static final Log logger = LogFactory.getLog(AsyncMcpToolProvider.class);
 
 	/**
 	 * Create a new SyncMcpToolProvider.
@@ -85,10 +85,8 @@ public class AsyncMcpToolProvider extends AbstractMcpToolProvider {
 
 					var meta = MetaUtils.getMeta(toolJavaAnnotation.metaProvider());
 
-					var toolBuilder = McpSchema.Tool.builder()
-						.name(toolName)
+					var toolBuilder = McpSchema.Tool.builder(toolName, this.getJsonMapper(), inputSchema)
 						.description(toolDescription)
-						.inputSchema(this.getJsonMapper(), inputSchema)
 						.meta(meta);
 
 					var title = toolJavaAnnotation.title();
@@ -96,9 +94,13 @@ public class AsyncMcpToolProvider extends AbstractMcpToolProvider {
 					// Tool annotations
 					if (toolJavaAnnotation.annotations() != null) {
 						var toolAnnotations = toolJavaAnnotation.annotations();
-						toolBuilder.annotations(new McpSchema.ToolAnnotations(toolAnnotations.title(),
-								toolAnnotations.readOnlyHint(), toolAnnotations.destructiveHint(),
-								toolAnnotations.idempotentHint(), toolAnnotations.openWorldHint(), null));
+						toolBuilder.annotations(McpSchema.ToolAnnotations.builder()
+							.title(toolAnnotations.title())
+							.readOnlyHint(toolAnnotations.readOnlyHint())
+							.destructiveHint(toolAnnotations.destructiveHint())
+							.idempotentHint(toolAnnotations.idempotentHint())
+							.openWorldHint(toolAnnotations.openWorldHint())
+							.build());
 
 						// If not provided, the name should be used for display (except
 						// for Tool, where annotations.title should be given precedence
@@ -141,7 +143,7 @@ public class AsyncMcpToolProvider extends AbstractMcpToolProvider {
 									: ReturnMode.TEXT;
 
 					BiFunction<McpAsyncServerExchange, CallToolRequest, Mono<CallToolResult>> methodCallback = new AsyncMcpToolMethodCallback(
-							returnMode, mcpToolMethod, toolObject, this.doGetToolCallException());
+							returnMode, mcpToolMethod, toolObject);
 
 					AsyncToolSpecification toolSpec = AsyncToolSpecification.builder()
 						.tool(tool)
@@ -155,7 +157,9 @@ public class AsyncMcpToolProvider extends AbstractMcpToolProvider {
 			.toList();
 
 		if (toolSpecs.isEmpty()) {
-			logger.warn("No tool methods found in the provided tool objects: {}", this.toolObjects);
+			if (logger.isWarnEnabled()) {
+				logger.warn("No tool methods found in the provided tool objects: " + this.toolObjects);
+			}
 		}
 
 		return toolSpecs;

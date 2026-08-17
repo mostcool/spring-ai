@@ -36,7 +36,7 @@ import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.CompleteRequest;
 import io.modelcontextprotocol.spec.McpSchema.CompleteResult;
 import io.modelcontextprotocol.spec.McpSchema.CreateMessageResult;
-import io.modelcontextprotocol.spec.McpSchema.ElicitRequest;
+import io.modelcontextprotocol.spec.McpSchema.ElicitFormRequest;
 import io.modelcontextprotocol.spec.McpSchema.ElicitResult;
 import io.modelcontextprotocol.spec.McpSchema.GetPromptRequest;
 import io.modelcontextprotocol.spec.McpSchema.GetPromptResult;
@@ -54,8 +54,6 @@ import io.modelcontextprotocol.spec.McpSchema.TextContent;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 import net.javacrumbs.jsonunit.core.Option;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.server.HttpServer;
 import tools.jackson.databind.json.JsonMapper;
@@ -86,8 +84,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.InstanceOfAssertFactories.map;
 
 public class SseWebClientWebFluxServerIT {
-
-	private static final Logger logger = LoggerFactory.getLogger(SseWebClientWebFluxServerIT.class);
 
 	private static final JacksonMcpJsonMapper jsonMapper = new JacksonMcpJsonMapper(new JsonMapper());
 
@@ -139,17 +135,13 @@ public class SseWebClientWebFluxServerIT {
 
 						// tool list
 						assertThat(mcpClient.listTools().tools()).hasSize(2);
-						assertThat(mcpClient.listTools().tools()).contains(Tool.builder()
-							.name("tool1")
-							.description("tool1 description")
-							.inputSchema(jsonMapper, """
-									{
-										"": "http://json-schema.org/draft-07/schema#",
-										"type": "object",
-										"properties": {}
-									}
-									""")
-							.build());
+						assertThat(mcpClient.listTools().tools()).contains(Tool.builder("tool1", jsonMapper, """
+								{
+									"": "http://json-schema.org/draft-07/schema#",
+									"type": "object",
+									"properties": {}
+								}
+								""").description("tool1 description").build());
 
 						// Call a tool that sends progress notifications
 						CallToolRequest toolRequest = CallToolRequest.builder("tool1")
@@ -169,7 +161,9 @@ public class SseWebClientWebFluxServerIT {
 						// TOOL STRUCTURED OUTPUT
 						// Call tool with valid structured output
 						CallToolResult calculatorToolResponse = mcpClient
-							.callTool(new McpSchema.CallToolRequest("calculator", Map.of("expression", "2 + 3")));
+							.callTool(McpSchema.CallToolRequest.builder("calculator")
+								.arguments(Map.of("expression", "2 + 3"))
+								.build());
 
 						assertThat(calculatorToolResponse).isNotNull();
 						assertThat(calculatorToolResponse.isError()).isFalse();
@@ -230,14 +224,16 @@ public class SseWebClientWebFluxServerIT {
 						assertThat(mcpClient.listPrompts().prompts()).hasSize(1);
 
 						// get prompt
-						GetPromptResult promptResult = mcpClient
-							.getPrompt(new GetPromptRequest("code-completion", Map.of("language", "java")));
+						GetPromptResult promptResult = mcpClient.getPrompt(GetPromptRequest.builder("code-completion")
+							.arguments(Map.of("language", "java"))
+							.build());
 						assertThat(promptResult).isNotNull();
 
 						// completion
-						CompleteRequest completeRequest = new CompleteRequest(
-								new PromptReference("ref/prompt", "code-completion", "Code completion"),
-								new CompleteRequest.CompleteArgument("language", "py"));
+						CompleteRequest completeRequest = CompleteRequest
+							.builder(new PromptReference("ref/prompt", "code-completion", "Code completion"),
+									new CompleteRequest.CompleteArgument("language", "py"))
+							.build();
 
 						CompleteResult completeResult = mcpClient.completeCompletion(completeRequest);
 
@@ -308,13 +304,13 @@ public class SseWebClientWebFluxServerIT {
 
 			// Tool 1
 			McpServerFeatures.SyncToolSpecification tool1 = McpServerFeatures.SyncToolSpecification.builder()
-				.tool(Tool.builder().name("tool1").description("tool1 description").inputSchema(jsonMapper, """
+				.tool(Tool.builder("tool1", jsonMapper, """
 						{
 							"": "http://json-schema.org/draft-07/schema#",
 							"type": "object",
 							"properties": {}
 						}
-						""").build())
+						""").description("tool1 description").build())
 				.callHandler((exchange, request) -> {
 
 					var progressToken = request.progressToken();
@@ -327,7 +323,7 @@ public class SseWebClientWebFluxServerIT {
 					exchange.ping(); // call client ping
 
 					// call elicitation
-					var elicitationRequest = McpSchema.ElicitRequest
+					var elicitationRequest = ElicitFormRequest
 						.builder("Test message",
 								Map.of("type", "object", "properties", Map.of("message", Map.of("type", "string"))))
 						.build();
@@ -341,10 +337,14 @@ public class SseWebClientWebFluxServerIT {
 
 					// call sampling
 					var createMessageRequest = McpSchema.CreateMessageRequest
-						.builder(List.of(new McpSchema.SamplingMessage(McpSchema.Role.USER,
-								McpSchema.TextContent.builder("Test Sampling Message").build())), 500)
+						.builder(
+								List.of(McpSchema.SamplingMessage
+									.builder(McpSchema.Role.USER,
+											McpSchema.TextContent.builder("Test Sampling Message").build())
+									.build()),
+								500)
 						.modelPreferences(ModelPreferences.builder()
-							.hints(List.of(ModelHint.of("OpenAi"), ModelHint.of("Ollama")))
+							.hints(List.of(new ModelHint("OpenAi"), new ModelHint("Ollama")))
 							.costPriority(1.0)
 							.speedPriority(1.0)
 							.intelligencePriority(1.0)
@@ -376,8 +376,7 @@ public class SseWebClientWebFluxServerIT {
 							Map.of("type", "string"), "timestamp", Map.of("type", "string")),
 					"required", List.of("result", "operation"));
 
-			Tool calculatorTool = Tool.builder()
-				.name("calculator")
+			Tool calculatorTool = Tool.builder("calculator", Map.of())
 				.description("Performs mathematical calculations")
 				.outputSchema(outputSchema)
 				.build();
@@ -400,8 +399,11 @@ public class SseWebClientWebFluxServerIT {
 		@Bean
 		public List<McpServerFeatures.SyncPromptSpecification> myPrompts() {
 
-			var prompt = new McpSchema.Prompt("code-completion", "Code completion", "this is code review prompt",
-					List.of(new PromptArgument("language", "Language", "string", false)));
+			var prompt = McpSchema.Prompt.builder("code-completion")
+				.title("Code completion")
+				.description("this is code review prompt")
+				.arguments(List.of(new PromptArgument("language", "Language", "string", false)))
+				.build();
 
 			var promptSpecification = new McpServerFeatures.SyncPromptSpecification(prompt,
 					(exchange, getPromptRequest) -> {
@@ -435,7 +437,7 @@ public class SseWebClientWebFluxServerIT {
 		@Bean
 		public List<McpServerFeatures.SyncCompletionSpecification> myCompletions() {
 			var completion = new McpServerFeatures.SyncCompletionSpecification(
-					new McpSchema.PromptReference("ref/prompt", "code-completion", "Code completion"),
+					McpSchema.PromptReference.builder("code-completion").title("Code completion").build(),
 					(exchange, request) -> {
 						var expectedValues = List.of("python", "pytorch", "pyside");
 						return new McpSchema.CompleteResult(new CompleteResult.CompleteCompletion(expectedValues, 10, // total
@@ -462,8 +464,9 @@ public class SseWebClientWebFluxServerIT {
 									System.getProperty("java.version"));
 							String jsonContent = new JsonMapper().writeValueAsString(systemInfo);
 							return McpSchema.ReadResourceResult
-								.builder(List.of(new McpSchema.TextResourceContents(request.uri(), "application/json",
-										jsonContent)))
+								.builder(List.of(McpSchema.TextResourceContents.builder(request.uri(), jsonContent)
+									.mimeType("application/json")
+									.build()))
 								.build();
 						}
 						catch (Exception e) {
@@ -500,10 +503,7 @@ public class SseWebClientWebFluxServerIT {
 			return (name, mcpClientSpec) -> {
 
 				// Add logging handler
-				mcpClientSpec = mcpClientSpec.loggingConsumer(logingMessage -> {
-					testContext.loggingNotificationRef.set(logingMessage);
-					logger.info("MCP LOGGING: [{}] {}", logingMessage.level(), logingMessage.data());
-				});
+				mcpClientSpec = mcpClientSpec.loggingConsumer(testContext.loggingNotificationRef::set);
 
 				// Add sampling handler
 				Function<McpSchema.CreateMessageRequest, CreateMessageResult> samplingHandler = llmRequest -> {
@@ -517,7 +517,7 @@ public class SseWebClientWebFluxServerIT {
 				mcpClientSpec.sampling(samplingHandler);
 
 				// Add elicitation handler
-				Function<ElicitRequest, ElicitResult> elicitationHandler = request -> {
+				Function<ElicitFormRequest, ElicitResult> elicitationHandler = request -> {
 					assertThat(request.message()).isNotEmpty();
 					assertThat(request.requestedSchema()).isNotNull();
 					return new ElicitResult(ElicitResult.Action.ACCEPT, Map.of("message", request.message()));

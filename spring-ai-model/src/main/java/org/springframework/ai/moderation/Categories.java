@@ -18,6 +18,8 @@ package org.springframework.ai.moderation;
 
 import java.util.Objects;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * The Categories class represents a set of categories used to classify content. Each
  * category can be either true (indicating that the content belongs to the category) or
@@ -26,6 +28,7 @@ import java.util.Objects;
  * @author Ahmed Yousri
  * @author Ilayaperumal Gopinathan
  * @author Ricken Bazolo
+ * @author Nicolas Krier
  * @since 1.0.0
  */
 public final class Categories {
@@ -52,7 +55,15 @@ public final class Categories {
 
 	private final boolean violence;
 
+	// Use criminal and dangerous attributes instead of it.
+	@Deprecated(since = "2.0.1", forRemoval = true)
 	private final boolean dangerousAndCriminalContent;
+
+	private final boolean criminal;
+
+	private final boolean dangerous;
+
+	private final boolean jailbreaking;
 
 	private final boolean health;
 
@@ -75,6 +86,9 @@ public final class Categories {
 		this.harassmentThreatening = builder.harassmentThreatening;
 		this.violence = builder.violence;
 		this.dangerousAndCriminalContent = builder.dangerousAndCriminalContent;
+		this.criminal = builder.criminal;
+		this.dangerous = builder.dangerous;
+		this.jailbreaking = builder.jailbreaking;
 		this.health = builder.health;
 		this.financial = builder.financial;
 		this.law = builder.law;
@@ -129,8 +143,31 @@ public final class Categories {
 		return this.violence;
 	}
 
+	// Use criminal and dangerous getters instead of it.
+	@Deprecated(since = "2.0.1", forRemoval = true)
 	public boolean isDangerousAndCriminalContent() {
 		return this.dangerousAndCriminalContent;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public boolean isCriminal() {
+		return this.criminal;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public boolean isDangerous() {
+		return this.dangerous;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public boolean isJailbreaking() {
+		return this.jailbreaking;
 	}
 
 	public boolean isHealth() {
@@ -150,7 +187,7 @@ public final class Categories {
 	}
 
 	@Override
-	public boolean equals(Object o) {
+	public boolean equals(@Nullable Object o) {
 		if (this == o) {
 			return true;
 		}
@@ -162,7 +199,9 @@ public final class Categories {
 				&& this.hateThreatening == that.hateThreatening && this.violenceGraphic == that.violenceGraphic
 				&& this.selfHarmIntent == that.selfHarmIntent && this.selfHarmInstructions == that.selfHarmInstructions
 				&& this.harassmentThreatening == that.harassmentThreatening && this.violence == that.violence
-				&& this.dangerousAndCriminalContent == that.dangerousAndCriminalContent && this.health == that.health
+				&& this.dangerousAndCriminalContent == that.dangerousAndCriminalContent
+				&& this.criminal == that.criminal && this.dangerous == that.dangerous
+				&& this.jailbreaking == that.jailbreaking && this.health == that.health
 				&& this.financial == that.financial && this.law == that.law && this.pii == that.pii;
 	}
 
@@ -170,8 +209,8 @@ public final class Categories {
 	public int hashCode() {
 		return Objects.hash(this.sexual, this.hate, this.harassment, this.selfHarm, this.sexualMinors,
 				this.hateThreatening, this.violenceGraphic, this.selfHarmIntent, this.selfHarmInstructions,
-				this.harassmentThreatening, this.violence, this.dangerousAndCriminalContent, this.health,
-				this.financial, this.law, this.pii);
+				this.harassmentThreatening, this.violence, this.dangerousAndCriminalContent, this.criminal,
+				this.dangerous, this.jailbreaking, this.health, this.financial, this.law, this.pii);
 	}
 
 	@Override
@@ -181,7 +220,8 @@ public final class Categories {
 				+ this.hateThreatening + ", violenceGraphic=" + this.violenceGraphic + ", selfHarmIntent="
 				+ this.selfHarmIntent + ", selfHarmInstructions=" + this.selfHarmInstructions
 				+ ", harassmentThreatening=" + this.harassmentThreatening + ", violence=" + this.violence
-				+ ", dangerousAndCriminalContent=" + this.dangerousAndCriminalContent + ", health=" + this.health
+				+ ", dangerousAndCriminalContent=" + this.dangerousAndCriminalContent + ", criminal=" + this.criminal
+				+ ", dangerous=" + this.dangerous + ", jailbreaking=" + this.jailbreaking + ", health=" + this.health
 				+ ", financial=" + this.financial + ", law=" + this.law + ", pii=" + this.pii + '}';
 	}
 
@@ -209,7 +249,15 @@ public final class Categories {
 
 		private boolean violence;
 
+		// Use criminal and dangerous attributes instead of it.
+		@Deprecated(since = "2.0.1", forRemoval = true)
 		private boolean dangerousAndCriminalContent;
+
+		private boolean criminal;
+
+		private boolean dangerous;
+
+		private boolean jailbreaking;
 
 		private boolean health;
 
@@ -274,8 +322,34 @@ public final class Categories {
 			return this;
 		}
 
+		// Use criminal and dangerous building methods instead of it.
+		@Deprecated(since = "2.0.1", forRemoval = true)
 		public Builder dangerousAndCriminalContent(boolean dangerousAndCriminalContent) {
 			this.dangerousAndCriminalContent = dangerousAndCriminalContent;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder criminal(boolean criminal) {
+			this.criminal = criminal;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder dangerous(boolean dangerous) {
+			this.dangerous = dangerous;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder jailbreaking(boolean jailbreaking) {
+			this.jailbreaking = jailbreaking;
 			return this;
 		}
 

@@ -30,9 +30,7 @@ import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.cache.GoogleGenAiCachedContentService;
 import org.springframework.ai.model.SpringAIModelProperties;
 import org.springframework.ai.model.SpringAIModels;
-import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
 import org.springframework.ai.model.tool.ToolCallingManager;
-import org.springframework.ai.model.tool.ToolExecutionEligibilityPredicate;
 import org.springframework.ai.retry.RetryUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -41,7 +39,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.core.retry.RetryTemplate;
@@ -113,11 +110,6 @@ public class GoogleGenAiChatAutoConfiguration {
 		return builder.build();
 	}
 
-	private boolean isVertexAiConfiguration(GoogleGenAiConnectionProperties props) {
-		return props.isVertexAi()
-				|| (StringUtils.hasText(props.getProjectId()) && StringUtils.hasText(props.getLocation()));
-	}
-
 	private void configureVertexAi(Client.Builder builder, GoogleGenAiConnectionProperties props) throws IOException {
 		Assert.hasText(props.getProjectId(), "Google GenAI project-id must be set for Vertex AI mode!");
 		Assert.hasText(props.getLocation(), "Google GenAI location must be set for Vertex AI mode!");
@@ -134,17 +126,14 @@ public class GoogleGenAiChatAutoConfiguration {
 	@Bean
 	@ConditionalOnMissingBean
 	public GoogleGenAiChatModel googleGenAiChatModel(Client googleGenAiClient, GoogleGenAiChatProperties chatProperties,
-			ToolCallingManager toolCallingManager, ApplicationContext context,
-			ObjectProvider<RetryTemplate> retryTemplate, ObjectProvider<ObservationRegistry> observationRegistry,
-			ObjectProvider<ChatModelObservationConvention> observationConvention,
-			ObjectProvider<ToolExecutionEligibilityPredicate> toolExecutionEligibilityPredicate) {
+			ToolCallingManager toolCallingManager, ObjectProvider<RetryTemplate> retryTemplate,
+			ObjectProvider<ObservationRegistry> observationRegistry,
+			ObjectProvider<ChatModelObservationConvention> observationConvention) {
 
 		GoogleGenAiChatModel chatModel = GoogleGenAiChatModel.builder()
 			.genAiClient(googleGenAiClient)
-			.defaultOptions(chatProperties.toOptions())
+			.options(chatProperties.toOptions())
 			.toolCallingManager(toolCallingManager)
-			.toolExecutionEligibilityPredicate(
-					toolExecutionEligibilityPredicate.getIfUnique(() -> new DefaultToolExecutionEligibilityPredicate()))
 			.retryTemplate(retryTemplate.getIfUnique(() -> RetryUtils.DEFAULT_RETRY_TEMPLATE))
 			.observationRegistry(observationRegistry.getIfUnique(() -> ObservationRegistry.NOOP))
 			.build();

@@ -25,8 +25,6 @@ import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -42,9 +40,9 @@ import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.ListOutputConverter;
 import org.springframework.ai.converter.MapOutputConverter;
 import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.deepseek.DeepSeekChatModel;
 import org.springframework.ai.deepseek.DeepSeekChatOptions;
 import org.springframework.ai.deepseek.DeepSeekTestConfiguration;
-import org.springframework.ai.deepseek.api.DeepSeekApi;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -54,7 +52,10 @@ import org.springframework.core.io.Resource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
+ * Integration tests for {@link DeepSeekChatModel}.
+ *
  * @author Geng Rong
+ * @author guan xu
  */
 @SpringBootTest(classes = DeepSeekTestConfiguration.class)
 @EnabledIfEnvironmentVariable(named = "DEEPSEEK_API_KEY", matches = ".+")
@@ -65,8 +66,6 @@ class DeepSeekChatModelIT {
 
 	@Autowired
 	protected StreamingChatModel streamingChatModel;
-
-	private static final Logger logger = LoggerFactory.getLogger(DeepSeekChatModelIT.class);
 
 	@Value("classpath:/prompts/system-message.st")
 	private Resource systemResource;
@@ -169,7 +168,6 @@ class DeepSeekChatModelIT {
 		Generation generation = this.chatModel.call(prompt).getResult();
 
 		ActorsFilmsRecord actorsFilms = outputConverter.convert(generation.getOutput().getText());
-		logger.info("" + actorsFilms);
 		assertThat(actorsFilms.actor()).isEqualTo("Tom Hanks");
 		assertThat(actorsFilms.movies()).hasSize(5);
 	}
@@ -202,7 +200,6 @@ class DeepSeekChatModelIT {
 			.collect(Collectors.joining());
 
 		ActorsFilmsRecord actorsFilms = outputConverter.convert(generationTextFromStream);
-		logger.info("" + actorsFilms);
 		assertThat(actorsFilms.actor()).isEqualTo("Tom Hanks");
 		assertThat(actorsFilms.movies()).hasSize(5);
 	}
@@ -233,15 +230,9 @@ class DeepSeekChatModelIT {
 		assertThat(response.getResult().getOutput().getText()).isEqualTo(",2,3]}}");
 	}
 
-	/**
-	 * For deepseek-reasoner model only. The reasoning contents of the assistant message,
-	 * before the final answer.
-	 */
 	@Test
-	void reasonerModelTest() {
-		var promptOptions = DeepSeekChatOptions.builder()
-			.model(DeepSeekApi.ChatModel.DEEPSEEK_REASONER.getValue())
-			.build();
+	void reasoningTest() {
+		var promptOptions = DeepSeekChatOptions.builder().build();
 		Prompt prompt = new Prompt("9.11 and 9.8, which is greater?", promptOptions);
 		ChatResponse response = this.chatModel.call(prompt);
 
@@ -250,16 +241,11 @@ class DeepSeekChatModelIT {
 		assertThat(deepSeekAssistantMessage.getText()).isNotEmpty();
 	}
 
-	/**
-	 * the deepseek-reasoner model Multi-round Conversation.
-	 */
 	@Test
-	void reasonerModelMultiRoundTest() {
+	void reasoningMultiRoundTest() {
 		List<Message> messages = new ArrayList<>();
 		messages.add(new UserMessage("9.11 and 9.8, which is greater?"));
-		var promptOptions = DeepSeekChatOptions.builder()
-			.model(DeepSeekApi.ChatModel.DEEPSEEK_REASONER.getValue())
-			.build();
+		var promptOptions = DeepSeekChatOptions.builder().build();
 
 		Prompt prompt = new Prompt(messages, promptOptions);
 		ChatResponse response = this.chatModel.call(prompt);
@@ -277,6 +263,50 @@ class DeepSeekChatModelIT {
 			.getOutput();
 		assertThat(deepSeekAssistantMessage2.getReasoningContent()).isNotEmpty();
 		assertThat(deepSeekAssistantMessage2.getText()).isNotEmpty();
+	}
+
+	@Test
+	void thinkingEnabledTest() {
+		var promptOptions = DeepSeekChatOptions.builder().enableThinking().build();
+		Prompt prompt = new Prompt("9.11 and 9.8, which is greater?", promptOptions);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		DeepSeekAssistantMessage deepSeekAssistantMessage = (DeepSeekAssistantMessage) response.getResult().getOutput();
+		assertThat(deepSeekAssistantMessage.getReasoningContent()).isNotEmpty();
+		assertThat(deepSeekAssistantMessage.getText()).isNotEmpty();
+	}
+
+	@Test
+	void thinkingDisabledTest() {
+		var promptOptions = DeepSeekChatOptions.builder().disableThinking().build();
+		Prompt prompt = new Prompt("9.11 and 9.8, which is greater?", promptOptions);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		DeepSeekAssistantMessage deepSeekAssistantMessage = (DeepSeekAssistantMessage) response.getResult().getOutput();
+		assertThat(deepSeekAssistantMessage.getReasoningContent()).isNullOrEmpty();
+		assertThat(deepSeekAssistantMessage.getText()).isNotEmpty();
+	}
+
+	@Test
+	void reasoningEffortMaxTest() {
+		var promptOptions = DeepSeekChatOptions.builder().reasoningEffortMax().build();
+		Prompt prompt = new Prompt("9.11 and 9.8, which is greater?", promptOptions);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		DeepSeekAssistantMessage deepSeekAssistantMessage = (DeepSeekAssistantMessage) response.getResult().getOutput();
+		assertThat(deepSeekAssistantMessage.getReasoningContent()).isNotEmpty();
+		assertThat(deepSeekAssistantMessage.getText()).isNotEmpty();
+	}
+
+	@Test
+	void reasoningEffortHighTest() {
+		var promptOptions = DeepSeekChatOptions.builder().reasoningEffortHigh().build();
+		Prompt prompt = new Prompt("9.11 and 9.8, which is greater?", promptOptions);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		DeepSeekAssistantMessage deepSeekAssistantMessage = (DeepSeekAssistantMessage) response.getResult().getOutput();
+		assertThat(deepSeekAssistantMessage.getReasoningContent()).isNotEmpty();
+		assertThat(deepSeekAssistantMessage.getText()).isNotEmpty();
 	}
 
 	record ActorsFilmsRecord(String actor, List<String> movies) {

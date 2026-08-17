@@ -18,23 +18,34 @@ package org.springframework.ai.openai;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.openai.client.OpenAIClient;
+import com.openai.core.RequestOptions;
 import com.openai.core.http.Headers;
+import com.openai.core.http.HttpResponse;
+import com.openai.errors.OpenAIIoException;
 import com.openai.models.audio.speech.SpeechCreateParams;
 import com.openai.models.audio.speech.SpeechModel;
+import io.micrometer.observation.ObservationRegistry;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.SynchronousSink;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import org.springframework.ai.audio.tts.Speech;
 import org.springframework.ai.audio.tts.TextToSpeechModel;
 import org.springframework.ai.audio.tts.TextToSpeechOptions;
 import org.springframework.ai.audio.tts.TextToSpeechPrompt;
 import org.springframework.ai.audio.tts.TextToSpeechResponse;
+import org.springframework.ai.openai.http.okhttp.OpenAiHttpClientBuilderCustomizer;
 import org.springframework.ai.openai.metadata.OpenAiAudioSpeechResponseMetadata;
 import org.springframework.ai.openai.setup.OpenAiSetup;
 import org.springframework.util.Assert;
@@ -48,36 +59,42 @@ import org.springframework.util.StringUtils;
  * @author Thomas Vitale
  * @author Jonghoon Park
  * @author Ilayaperumal Gopinathan
+ * @author Sebastien Deleuze
+ * @author guan xu
  */
 public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 
-	private static final Logger logger = LoggerFactory.getLogger(OpenAiAudioSpeechModel.class);
+	private static final Log logger = LogFactory.getLog(OpenAiAudioSpeechModel.class);
 
-	private static final Double DEFAULT_SPEED = 1.0;
+	private static final int STREAM_CHUNK_SIZE = 8192;
 
-	private static final String DEFAULT_MODEL_NAME = OpenAiAudioSpeechOptions.DEFAULT_SPEECH_MODEL;
+	/**
+	 * Default {@link #stream(TextToSpeechPrompt)} scheduler, used unless a
+	 * {@link Builder#streamScheduler(Scheduler) custom one} is set. A dedicated pool,
+	 * sized like Reactor's shared {@link Schedulers#boundedElastic()}, so long-lived
+	 * streams don't contend with unrelated blocking work elsewhere in the app.
+	 */
+	private static final Scheduler DEFAULT_STREAM_SCHEDULER = Schedulers.newBoundedElastic(
+			Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE, Schedulers.DEFAULT_BOUNDED_ELASTIC_QUEUESIZE,
+			"openai-audio-speech");
 
 	private final OpenAIClient openAiClient;
 
-	private final OpenAiAudioSpeechOptions defaultOptions;
+	private final OpenAiAudioSpeechOptions options;
 
-	/**
-	 * Private constructor that takes individual configuration parameters.
-	 * @param openAiClient The OpenAI client instance.
-	 * @param defaultOptions The default options for speech generation.
-	 */
-	private OpenAiAudioSpeechModel(@Nullable OpenAIClient openAiClient,
-			@Nullable OpenAiAudioSpeechOptions defaultOptions) {
-		this.defaultOptions = Objects.requireNonNullElseGet(defaultOptions,
-				() -> OpenAiAudioSpeechOptions.builder().model(DEFAULT_MODEL_NAME).build());
-		this.openAiClient = Objects.requireNonNullElseGet(openAiClient,
-				() -> OpenAiSetup.setupSyncClient(this.defaultOptions.getBaseUrl(), this.defaultOptions.getApiKey(),
-						this.defaultOptions.getCredential(), this.defaultOptions.getMicrosoftDeploymentName(),
-						this.defaultOptions.getMicrosoftFoundryServiceVersion(),
-						this.defaultOptions.getOrganizationId(), this.defaultOptions.isMicrosoftFoundry(),
-						this.defaultOptions.isGitHubModels(), this.defaultOptions.getModel(),
-						this.defaultOptions.getTimeout(), this.defaultOptions.getMaxRetries(),
-						this.defaultOptions.getProxy(), this.defaultOptions.getCustomHeaders()));
+	private final Scheduler streamScheduler;
+
+	private OpenAiAudioSpeechModel(Builder builder) {
+		this.options = Objects.requireNonNullElseGet(builder.options, () -> OpenAiAudioSpeechOptions.builder().build());
+		this.openAiClient = Objects.requireNonNullElseGet(builder.openAiClient,
+				() -> OpenAiSetup.setupSyncClient(this.options.getBaseUrl(), this.options.getApiKey(),
+						this.options.getCredential(), this.options.getMicrosoftDeploymentName(),
+						this.options.getMicrosoftFoundryServiceVersion(), this.options.getOrganizationId(),
+						this.options.isMicrosoftFoundry(), this.options.isGitHubModels(), this.options.getModel(),
+						this.options.getTimeout(), this.options.getMaxRetries(), this.options.getProxy(),
+						this.options.getCustomHeaders(), ObservationRegistry.NOOP, null,
+						builder.httpClientCustomizers));
+		this.streamScheduler = Objects.requireNonNullElse(builder.streamScheduler, DEFAULT_STREAM_SCHEDULER);
 	}
 
 	/**
@@ -109,13 +126,145 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 
 		OpenAiAudioSpeechOptions mergedOptions = mergeOptions(prompt);
 		String inputText = getInputText(prompt, mergedOptions);
+		traceRequest("Calling", mergedOptions);
 
-		if (logger.isTraceEnabled()) {
-			logger.trace("Calling OpenAI SDK audio speech with model: {}, voice: {}, format: {}, speed: {}",
-					mergedOptions.getModel(), mergedOptions.getVoice(), mergedOptions.getResponseFormat(),
-					mergedOptions.getSpeed());
+		SpeechCreateParams params = buildSpeechCreateParams(mergedOptions, inputText, false);
+
+		RequestOptions requestOptions = this.buildRequestOptions(mergedOptions);
+
+		HttpResponse httpResponse = this.openAiClient.audio().speech().create(params, requestOptions);
+		Headers headers = httpResponse.headers();
+
+		byte[] audioBytes;
+		try (InputStream inputStream = httpResponse.body()) {
+			audioBytes = inputStream.readAllBytes();
+		}
+		catch (IOException e) {
+			throw new RuntimeException("Failed to read audio speech response", e);
 		}
 
+		if (audioBytes.length == 0) {
+			if (logger.isWarnEnabled()) {
+				logger.warn("No speech response returned for prompt: " + prompt);
+			}
+			return new TextToSpeechResponse(List.of(new Speech(new byte[0])));
+		}
+
+		Speech speech = new Speech(audioBytes);
+		OpenAiAudioSpeechResponseMetadata metadata = OpenAiAudioSpeechResponseMetadata.from(headers);
+
+		return new TextToSpeechResponse(List.of(speech), metadata);
+	}
+
+	@Override
+	public Flux<TextToSpeechResponse> stream(TextToSpeechPrompt prompt) {
+		Assert.notNull(prompt, "Prompt must not be null");
+
+		// Lets openSpeechStream/emitNextChunk tell a deliberate cancellation
+		// apart from a genuine I/O failure.
+		AtomicBoolean cancelled = new AtomicBoolean(false);
+
+		return Flux.<TextToSpeechResponse, SpeechStreamState>generate(() -> openSpeechStream(prompt, cancelled),
+				(state, sink) -> emitNextChunk(state, sink, cancelled), state -> {
+					if (state != null) {
+						state.close();
+					}
+				})
+			.subscribeOn(this.streamScheduler)
+			// After subscribeOn() so this runs before its worker is disposed -
+			// i.e. before the blocking call in progress gets interrupted -
+			// guaranteeing `cancelled` is already set when that's observed.
+			.doOnCancel(() -> cancelled.set(true));
+	}
+
+	private @Nullable SpeechStreamState openSpeechStream(TextToSpeechPrompt prompt, AtomicBoolean cancelled) {
+		OpenAiAudioSpeechOptions mergedOptions = mergeOptions(prompt);
+		String inputText = getInputText(prompt, mergedOptions);
+		traceRequest("Streaming", mergedOptions);
+
+		SpeechCreateParams params = buildSpeechCreateParams(mergedOptions, inputText, true);
+
+		RequestOptions requestOptions = this.buildRequestOptions(mergedOptions);
+
+		HttpResponse httpResponse;
+		try {
+			httpResponse = this.openAiClient.audio().speech().create(params, requestOptions);
+		}
+		catch (OpenAIIoException e) {
+			// The SDK wraps IOException - including one from this thread being
+			// interrupted on cancellation - into OpenAIIoException; `cancelled`
+			// tells that apart from a genuine connection failure.
+			if (Thread.interrupted()) {
+				Thread.currentThread().interrupt();
+			}
+			if (cancelled.get()) {
+				// No response ever arrived, so there's nothing to stream.
+				// Flux.generate supports a null state for this (see
+				// emitNextChunk's null check below).
+				return null;
+			}
+			throw e;
+		}
+		InputStream inputStream = httpResponse.body();
+		OpenAiAudioSpeechResponseMetadata metadata = OpenAiAudioSpeechResponseMetadata.from(httpResponse.headers());
+
+		return new SpeechStreamState(httpResponse, inputStream, metadata);
+	}
+
+	private @Nullable SpeechStreamState emitNextChunk(@Nullable SpeechStreamState state,
+			SynchronousSink<TextToSpeechResponse> sink, AtomicBoolean cancelled) {
+		if (state == null) {
+			// Cancelled before openSpeechStream obtained a response.
+			sink.complete();
+			return null;
+		}
+
+		byte[] buffer = new byte[STREAM_CHUNK_SIZE];
+		int bytesRead;
+		try {
+			bytesRead = state.inputStream().read(buffer);
+		}
+		catch (IOException e) {
+			// A blocked read can fail from cancellation (this thread gets
+			// interrupted) or from a genuine fault like a socket timeout -
+			// SocketTimeoutException is itself an InterruptedIOException, so
+			// the exception type alone can't tell them apart; `cancelled` can.
+			if (Thread.interrupted()) {
+				Thread.currentThread().interrupt();
+			}
+			if (cancelled.get()) {
+				sink.complete();
+			}
+			else {
+				sink.error(new RuntimeException("Failed to read audio speech stream", e));
+			}
+			return state;
+		}
+
+		if (bytesRead == -1) {
+			sink.complete();
+			return state;
+		}
+
+		byte[] chunk = (bytesRead == buffer.length) ? buffer : Arrays.copyOf(buffer, bytesRead);
+		sink.next(new TextToSpeechResponse(List.of(new Speech(chunk)), state.metadata()));
+		return state;
+	}
+
+	private OpenAiAudioSpeechOptions mergeOptions(TextToSpeechPrompt prompt) {
+		return OpenAiAudioSpeechOptions.builder().from(this.options).merge(prompt.getOptions()).build();
+	}
+
+	private void traceRequest(String verb, OpenAiAudioSpeechOptions mergedOptions) {
+		if (logger.isTraceEnabled()) {
+			logger.trace(verb + " OpenAI SDK audio speech with model: " + mergedOptions.getModel() + ", voice: "
+					+ mergedOptions.getVoice() + ", format: " + mergedOptions.getResponseFormat() + ", speed: "
+					+ mergedOptions.getSpeed());
+		}
+	}
+
+	private SpeechCreateParams buildSpeechCreateParams(OpenAiAudioSpeechOptions mergedOptions, String inputText,
+			boolean streaming) {
 		String model;
 		if (mergedOptions.getDeploymentName() != null) {
 			model = mergedOptions.getDeploymentName();
@@ -139,81 +288,47 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 			paramsBuilder.speed(mergedOptions.getSpeed());
 		}
 
-		SpeechCreateParams params = paramsBuilder.build();
-
-		com.openai.core.http.HttpResponse httpResponse = this.openAiClient.audio().speech().create(params);
-		Headers headers = httpResponse.headers();
-
-		byte[] audioBytes;
-		try (InputStream inputStream = httpResponse.body()) {
-			audioBytes = inputStream.readAllBytes();
-		}
-		catch (IOException e) {
-			throw new RuntimeException("Failed to read audio speech response", e);
+		if (StringUtils.hasText(mergedOptions.getInstructions())) {
+			paramsBuilder.instructions(mergedOptions.getInstructions());
 		}
 
-		if (audioBytes.length == 0) {
-			logger.warn("No speech response returned for prompt: {}", prompt);
-			return new TextToSpeechResponse(List.of(new Speech(new byte[0])));
+		if (streaming) {
+			paramsBuilder.streamFormat(SpeechCreateParams.StreamFormat.AUDIO);
 		}
 
-		Speech speech = new Speech(audioBytes);
-		OpenAiAudioSpeechResponseMetadata metadata = OpenAiAudioSpeechResponseMetadata.from(headers);
-
-		return new TextToSpeechResponse(List.of(speech), metadata);
+		return paramsBuilder.build();
 	}
 
-	@Override
-	public Flux<TextToSpeechResponse> stream(TextToSpeechPrompt prompt) {
-		// TODO: The OpenAI SDK audio().speech() API does not support streaming yet.
-		// Return the full response as a single element Flux.
-		return Flux.just(call(prompt));
+	/**
+	 * Creates a RequestOptions instance from the given audio speech options.
+	 * @param options the audio speech options
+	 * @return a RequestOptions instance
+	 */
+	private RequestOptions buildRequestOptions(OpenAiAudioSpeechOptions options) {
+		Assert.notNull(options, "Options cannot be null");
+		RequestOptions.Builder requestOptionsBuilder = RequestOptions.builder();
+		if (options.getTimeout() != null) {
+			requestOptionsBuilder.timeout(options.getTimeout());
+		}
+		return requestOptionsBuilder.build();
 	}
 
+	/**
+	 * @since 2.0.0
+	 */
 	@Override
+	public OpenAiAudioSpeechOptions getOptions() {
+		return this.options;
+	}
+
+	/**
+	 * @deprecated use {@link #getOptions()} instead.
+	 */
+	@Deprecated(forRemoval = true)
+	@Override
+	@SuppressWarnings("removal")
 	public TextToSpeechOptions getDefaultOptions() {
-		return this.defaultOptions;
-	}
-
-	private OpenAiAudioSpeechOptions mergeOptions(TextToSpeechPrompt prompt) {
-		OpenAiAudioSpeechOptions runtimeOptions = (prompt
-			.getOptions() instanceof OpenAiAudioSpeechOptions openAiSdkOptions) ? openAiSdkOptions : null;
-
-		if (runtimeOptions != null) {
-			return merge(runtimeOptions, this.defaultOptions);
-		}
-		return this.defaultOptions;
-	}
-
-	private OpenAiAudioSpeechOptions merge(OpenAiAudioSpeechOptions source, OpenAiAudioSpeechOptions target) {
-		OpenAiAudioSpeechOptions.Builder builder = OpenAiAudioSpeechOptions.builder();
-
-		builder.model(source.getModel() != null ? source.getModel() : target.getModel());
-		builder.input(source.getInput() != null ? source.getInput() : target.getInput());
-		builder.voice(source.getVoice() != null ? source.getVoice() : target.getVoice());
-		builder.responseFormat(
-				source.getResponseFormat() != null ? source.getResponseFormat() : target.getResponseFormat());
-		builder.speed(source.getSpeed() != null ? source.getSpeed() : target.getSpeed());
-
-		// Merge parent class fields
-		builder.baseUrl(source.getBaseUrl() != null ? source.getBaseUrl() : target.getBaseUrl());
-		builder.apiKey(source.getApiKey() != null ? source.getApiKey() : target.getApiKey());
-		builder.credential(source.getCredential() != null ? source.getCredential() : target.getCredential());
-		builder.deploymentName(
-				source.getDeploymentName() != null ? source.getDeploymentName() : target.getDeploymentName());
-		builder.microsoftFoundryServiceVersion(source.getMicrosoftFoundryServiceVersion() != null
-				? source.getMicrosoftFoundryServiceVersion() : target.getMicrosoftFoundryServiceVersion());
-		builder.organizationId(
-				source.getOrganizationId() != null ? source.getOrganizationId() : target.getOrganizationId());
-		builder.microsoftFoundry(source.isMicrosoftFoundry() || target.isMicrosoftFoundry());
-		builder.gitHubModels(source.isGitHubModels() || target.isGitHubModels());
-		builder.timeout(source.getTimeout());
-		builder.maxRetries(source.getMaxRetries());
-		builder.proxy(source.getProxy() != null ? source.getProxy() : target.getProxy());
-		builder
-			.customHeaders(source.getCustomHeaders() != null ? source.getCustomHeaders() : target.getCustomHeaders());
-
-		return builder.build();
+		return this.options;
 	}
 
 	private String getInputText(TextToSpeechPrompt prompt, OpenAiAudioSpeechOptions options) {
@@ -224,24 +339,36 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 	}
 
 	/**
+	 * Holds the open HTTP response and its still-open body {@link InputStream} for the
+	 * duration of a {@link #stream(TextToSpeechPrompt)} subscription.
+	 */
+	private record SpeechStreamState(HttpResponse httpResponse, InputStream inputStream,
+			OpenAiAudioSpeechResponseMetadata metadata) {
+
+		void close() {
+			this.httpResponse.close();
+		}
+
+	}
+
+	/**
 	 * Builder for creating OpenAiAudioSpeechModel instances.
 	 */
 	public static final class Builder {
 
 		private @Nullable OpenAIClient openAiClient;
 
-		private @Nullable OpenAiAudioSpeechOptions defaultOptions;
+		private @Nullable OpenAiAudioSpeechOptions options;
+
+		private @Nullable Scheduler streamScheduler;
+
+		private List<OpenAiHttpClientBuilderCustomizer> httpClientCustomizers = new ArrayList<>();
 
 		/**
 		 * Default constructor with default options.
 		 */
 		private Builder() {
-			this.defaultOptions = OpenAiAudioSpeechOptions.builder()
-				.model(DEFAULT_MODEL_NAME)
-				.voice(OpenAiAudioSpeechOptions.Voice.ALLOY)
-				.responseFormat(OpenAiAudioSpeechOptions.AudioResponseFormat.MP3)
-				.speed(DEFAULT_SPEED)
-				.build();
+			this.options = OpenAiAudioSpeechOptions.builder().build();
 		}
 
 		/**
@@ -250,7 +377,8 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 		 */
 		private Builder(OpenAiAudioSpeechModel model) {
 			this.openAiClient = model.openAiClient;
-			this.defaultOptions = model.defaultOptions;
+			this.options = model.options;
+			this.streamScheduler = model.streamScheduler;
 		}
 
 		/**
@@ -265,13 +393,52 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 
 		/**
 		 * Sets the default options.
-		 * @param defaultOptions The default options to use
+		 * @param options The default options to use
 		 * @return This builder
 		 */
-		public Builder defaultOptions(@Nullable OpenAiAudioSpeechOptions defaultOptions) {
-			if (defaultOptions != null) {
-				this.defaultOptions = defaultOptions;
+		public Builder options(@Nullable OpenAiAudioSpeechOptions options) {
+			if (options != null) {
+				this.options = options;
 			}
+			return this;
+		}
+
+		/**
+		 * Sets the {@link Scheduler} for
+		 * {@link OpenAiAudioSpeechModel#stream(TextToSpeechPrompt)}. Defaults to a
+		 * dedicated pool; override to share a scheduler across components or size it for
+		 * expected concurrent-stream load.
+		 * @param streamScheduler The scheduler to use, or {@code null} to restore the
+		 * default
+		 * @return This builder
+		 */
+		public Builder streamScheduler(@Nullable Scheduler streamScheduler) {
+			this.streamScheduler = streamScheduler;
+			return this;
+		}
+
+		/**
+		 * Registers an {@link OpenAiHttpClientBuilderCustomizer} that mutates the
+		 * underlying OkHttp client builder before the OpenAI clients are constructed. Use
+		 * this to attach OkHttp interceptors (e.g. OAuth2 bearer-token injection), swap
+		 * the dispatcher executor, or tweak any other OkHttp setting. Customizers are
+		 * applied in the order they are registered, after Spring AI's own defaults, so
+		 * user code wins.
+		 */
+		public Builder httpClientBuilderCustomizer(OpenAiHttpClientBuilderCustomizer customizer) {
+			Assert.notNull(customizer, "customizer cannot be null");
+			this.httpClientCustomizers.add(customizer);
+			return this;
+		}
+
+		/**
+		 * Sets the full list of {@link OpenAiHttpClientBuilderCustomizer customizers} to
+		 * apply, replacing any customizers registered earlier on this builder. The order
+		 * of the list is preserved when invoking the customizers.
+		 */
+		public Builder httpClientBuilderCustomizers(List<OpenAiHttpClientBuilderCustomizer> customizers) {
+			Assert.notNull(customizers, "customizers cannot be null");
+			this.httpClientCustomizers = new ArrayList<>(customizers);
 			return this;
 		}
 
@@ -280,7 +447,7 @@ public final class OpenAiAudioSpeechModel implements TextToSpeechModel {
 		 * @return A new OpenAiAudioSpeechModel instance
 		 */
 		public OpenAiAudioSpeechModel build() {
-			return new OpenAiAudioSpeechModel(this.openAiClient, this.defaultOptions);
+			return new OpenAiAudioSpeechModel(this);
 		}
 
 	}

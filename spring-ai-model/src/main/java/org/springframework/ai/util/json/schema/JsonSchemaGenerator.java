@@ -21,6 +21,7 @@ import java.lang.reflect.Parameter;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Stream;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -43,7 +44,7 @@ import tools.jackson.databind.node.ObjectNode;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.model.KotlinModule;
 import org.springframework.ai.tool.annotation.ToolParam;
-import org.springframework.ai.util.json.JsonParser;
+import org.springframework.ai.util.JacksonUtils;
 import org.springframework.core.KotlinDetector;
 import org.springframework.core.Nullness;
 import org.springframework.util.Assert;
@@ -85,9 +86,9 @@ public final class JsonSchemaGenerator {
 	 */
 	private static final boolean PROPERTY_REQUIRED_BY_DEFAULT = true;
 
-	private static final SchemaGenerator TYPE_SCHEMA_GENERATOR;
+	private static final SchemaGenerator typeSchemaGenerator;
 
-	private static final SchemaGenerator SUBTYPE_SCHEMA_GENERATOR;
+	private static final SchemaGenerator subtypeSchemaGenerator;
 
 	/*
 	 * Initialize JSON Schema generators.
@@ -112,22 +113,28 @@ public final class JsonSchemaGenerator {
 		}
 
 		SchemaGeneratorConfig typeSchemaGeneratorConfig = schemaGeneratorConfigBuilder.build();
-		TYPE_SCHEMA_GENERATOR = new SchemaGenerator(typeSchemaGeneratorConfig);
+		typeSchemaGenerator = new SchemaGenerator(typeSchemaGeneratorConfig);
 
 		SchemaGeneratorConfig subtypeSchemaGeneratorConfig = schemaGeneratorConfigBuilder
 			.without(Option.SCHEMA_VERSION_INDICATOR)
 			.build();
-		SUBTYPE_SCHEMA_GENERATOR = new SchemaGenerator(subtypeSchemaGeneratorConfig);
+		subtypeSchemaGenerator = new SchemaGenerator(subtypeSchemaGeneratorConfig);
 	}
 
 	private JsonSchemaGenerator() {
+	}
+
+	private static ObjectNode generateSchema(SchemaGenerator generator, Type type) {
+		synchronized (generator) {
+			return generator.generateSchema(type);
+		}
 	}
 
 	/**
 	 * Generate a JSON Schema for a method's input parameters.
 	 */
 	public static String generateForMethodInput(Method method, SchemaOption... schemaOptions) {
-		ObjectNode schema = JsonParser.getJsonMapper().createObjectNode();
+		ObjectNode schema = JacksonUtils.getDefaultJsonMapper().createObjectNode();
 		schema.put("$schema", SchemaVersion.DRAFT_2020_12.getIdentifier());
 		schema.put("type", "object");
 		ObjectNode defs = schema.putObject("$defs");
@@ -146,10 +153,16 @@ public final class JsonSchemaGenerator {
 				// outside the model interaction flow.
 				continue;
 			}
+			// A Kotlin suspend function carries a synthetic trailing Continuation
+			// parameter that is not part of the tool contract and must not appear in
+			// the generated schema.
+			if (KotlinDetector.isSuspendingFunction(method) && i == method.getParameterCount() - 1) {
+				continue;
+			}
 			if (isMethodParameterRequired(method, i)) {
 				required.add(parameterName);
 			}
-			ObjectNode parameterNode = SUBTYPE_SCHEMA_GENERATOR.generateSchema(parameterType);
+			ObjectNode parameterNode = generateSchema(subtypeSchemaGenerator, parameterType);
 			// victools generates self-contained schemas where $defs and the $ref
 			// pointers into them are rooted at the sub-schema. Inlining the
 			// sub-schema under properties.<paramName> re-parents existing
@@ -182,7 +195,7 @@ public final class JsonSchemaGenerator {
 	 */
 	public static String generateForType(Type type, SchemaOption... schemaOptions) {
 		Assert.notNull(type, "type cannot be null");
-		ObjectNode schema = TYPE_SCHEMA_GENERATOR.generateSchema(type);
+		ObjectNode schema = generateSchema(typeSchemaGenerator, type);
 		if ((type == Void.class) && !schema.has("properties")) {
 			schema.putObject("properties");
 		}
@@ -300,7 +313,6 @@ public final class JsonSchemaGenerator {
 		});
 	}
 
-	// Based on the method in ModelOptionsUtils.
 	public static void convertTypeValuesToUpperCase(ObjectNode node) {
 		if (node.isObject()) {
 			node.properties().forEach(entry -> {
@@ -315,9 +327,9 @@ public final class JsonSchemaGenerator {
 						}
 					});
 				}
-				else if (value.isTextual() && entry.getKey().equals("type")) {
-					String oldValue = node.get("type").asText();
-					node.put("type", oldValue.toUpperCase());
+				else if (value.isString() && entry.getKey().equals("type")) {
+					String oldValue = node.get("type").asString();
+					node.put("type", oldValue.toUpperCase(Locale.ROOT));
 				}
 			});
 		}

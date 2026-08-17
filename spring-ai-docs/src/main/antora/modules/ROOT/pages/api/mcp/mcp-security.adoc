@@ -465,7 +465,7 @@ McpSyncClient client(
             .httpRequestCustomizer(requestCustomizer)
             .build();
 
-    var clientInfo = new McpSchema.Implementation("client-name", commonProps.getVersion());
+    var clientInfo = McpSchema.Implementation.builder("client-name", commonProps.getVersion()).build();
 
     return McpClient.sync(transport)
             .clientInfo(clientInfo)
@@ -490,7 +490,7 @@ McpSyncClient client(
             .jsonMapper(new JacksonMcpJsonMapper(jsonMapper))
             .build();
 
-    var clientInfo = new McpSchema.Implementation("clientName", commonProperties.getVersion());
+    var clientInfo = McpSchema.Implementation.builder("clientName", commonProperties.getVersion()).build();
 
     return McpClient.sync(transport)
             .clientInfo(clientInfo)
@@ -505,7 +505,8 @@ Then add the client to your chat client:
 [source,java]
 ----
 var chatResponse = chatClient.prompt("Prompt the LLM to do the thing")
-        .toolCallbacks(new SyncMcpToolCallbackProvider(mcpClient1, mcpClient2, mcpClient3))
+        .tools(new SyncMcpToolCallbackProvider(
+                mcpClient1, mcpClient2, mcpClient3))
         .call()
         .content();
 ----

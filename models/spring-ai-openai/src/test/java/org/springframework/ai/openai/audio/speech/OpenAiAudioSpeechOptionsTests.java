@@ -16,6 +16,8 @@
 
 package org.springframework.ai.openai.audio.speech;
 
+import java.util.Map;
+
 import org.junit.jupiter.api.Test;
 
 import org.springframework.ai.audio.tts.TextToSpeechOptions;
@@ -23,6 +25,11 @@ import org.springframework.ai.openai.OpenAiAudioSpeechOptions;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Unit tests for {@link OpenAiAudioSpeechOptions}.
+ *
+ * @author guan xu
+ */
 class OpenAiAudioSpeechOptionsTests {
 
 	@Test
@@ -40,6 +47,44 @@ class OpenAiAudioSpeechOptionsTests {
 		assertThat(merged.getVoice()).isEqualTo("generic-voice");
 		assertThat(merged.getResponseFormat()).isEqualTo("mp3");
 		assertThat(merged.getSpeed()).isEqualTo(1.5);
+	}
+
+	@Test
+	void instructionsAreSetAndMerged() {
+		OpenAiAudioSpeechOptions defaultOptions = OpenAiAudioSpeechOptions.builder()
+			.instructions("default-instructions")
+			.build();
+
+		OpenAiAudioSpeechOptions requestOptions = OpenAiAudioSpeechOptions.builder()
+			.instructions("request-instructions")
+			.build();
+
+		OpenAiAudioSpeechOptions mergedOptions = OpenAiAudioSpeechOptions.builder()
+			.from(defaultOptions)
+			.merge(requestOptions)
+			.build();
+
+		assertThat(mergedOptions.getInstructions()).isEqualTo("request-instructions");
+	}
+
+	@Test
+	void testOptionsBuilderMergeCustomHeaders() {
+		OpenAiAudioSpeechOptions defaultOptions = OpenAiAudioSpeechOptions.builder()
+			.customHeaders(Map.of("default-header", "default-value"))
+			.build();
+
+		OpenAiAudioSpeechOptions requestOptions = OpenAiAudioSpeechOptions.builder()
+			.customHeaders(Map.of("merged-header1", "merged-value1", "merged-header2", "merged-value2"))
+			.build();
+
+		OpenAiAudioSpeechOptions mergedOptions = OpenAiAudioSpeechOptions.builder()
+			.from(defaultOptions)
+			.merge(requestOptions)
+			.build();
+
+		assertThat(mergedOptions.getCustomHeaders()).containsEntry("default-header", "default-value")
+			.containsEntry("merged-header1", "merged-value1")
+			.containsEntry("merged-header2", "merged-value2");
 	}
 
 }

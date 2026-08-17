@@ -17,23 +17,36 @@
 package org.springframework.ai.openai.moderation;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 
 import com.openai.client.OpenAIClient;
+import com.openai.core.RequestOptions;
+import com.openai.models.moderations.ModerationCreateParams;
+import com.openai.models.moderations.ModerationCreateResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import org.springframework.ai.moderation.ModerationOptions;
+import org.springframework.ai.moderation.ModerationPrompt;
 import org.springframework.ai.openai.OpenAiModerationModel;
 import org.springframework.ai.openai.OpenAiModerationOptions;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for OpenAiModerationModel.
  *
  * @author Ilayaperumal Gopinathan
+ * @author guan xu
  */
 @ExtendWith(MockitoExtension.class)
 class OpenAiModerationModelTests {
@@ -179,20 +192,6 @@ class OpenAiModerationModelTests {
 	}
 
 	@Test
-	void testOptionsCopy() {
-		OpenAiModerationOptions original = OpenAiModerationOptions.builder()
-			.model("omni-moderation-latest")
-			.baseUrl("https://api.example.com")
-			.build();
-
-		OpenAiModerationOptions copy = original.copy();
-
-		assertThat(copy).isNotSameAs(original);
-		assertThat(copy.getModel()).isEqualTo(original.getModel());
-		assertThat(copy.getBaseUrl()).isEqualTo(original.getBaseUrl());
-	}
-
-	@Test
 	void testOptionsEqualsAndHashCode() {
 		OpenAiModerationOptions options1 = OpenAiModerationOptions.builder()
 			.model("omni-moderation-latest")
@@ -218,18 +217,6 @@ class OpenAiModerationModelTests {
 	}
 
 	@Test
-	void testOptionsToString() {
-		OpenAiModerationOptions options = OpenAiModerationOptions.builder()
-			.model("omni-moderation-latest")
-			.baseUrl("https://api.example.com")
-			.build();
-
-		String string = options.toString();
-		assertThat(string).contains("omni-moderation-latest");
-		assertThat(string).contains("https://api.example.com");
-	}
-
-	@Test
 	void testDefaultModelValue() {
 		assertThat(OpenAiModerationOptions.DEFAULT_MODERATION_MODEL).isEqualTo("omni-moderation-latest");
 	}
@@ -238,6 +225,47 @@ class OpenAiModerationModelTests {
 	void testOptionsGetModelWithNullInternalValue() {
 		OpenAiModerationOptions options = OpenAiModerationOptions.builder().build();
 		assertThat(options.getModel()).isEqualTo(OpenAiModerationOptions.DEFAULT_MODERATION_MODEL);
+	}
+
+	@Test
+	void testOptionsBuilderMergeCustomHeaders() {
+		OpenAiModerationOptions defaultOptions = OpenAiModerationOptions.builder()
+			.customHeaders(Map.of("default-header", "default-value"))
+			.build();
+
+		OpenAiModerationOptions requestOptions = OpenAiModerationOptions.builder()
+			.customHeaders(Map.of("merged-header1", "merged-value1", "merged-header2", "merged-value2"))
+			.build();
+
+		OpenAiModerationOptions mergedOptions = OpenAiModerationOptions.builder()
+			.from(defaultOptions)
+			.merge(requestOptions)
+			.build();
+
+		assertThat(mergedOptions.getCustomHeaders()).containsEntry("default-header", "default-value")
+			.containsEntry("merged-header1", "merged-value1")
+			.containsEntry("merged-header2", "merged-value2");
+	}
+
+	@Test
+	void testPropagatesTimeoutFromRequestOptions() {
+		Duration expectedTimeout = Duration.ofSeconds(30);
+
+		OpenAIClient mockClient = mock(OpenAIClient.class, RETURNS_DEEP_STUBS);
+		when(mockClient.moderations().create(any(ModerationCreateParams.class), any(RequestOptions.class))).thenReturn(
+				ModerationCreateResponse.builder().id("TEST_ID").model("TEST_MODEL").results(List.of()).build());
+
+		OpenAiModerationModel model = OpenAiModerationModel.builder().openAiClient(mockClient).build();
+
+		OpenAiModerationOptions options = OpenAiModerationOptions.builder().timeout(expectedTimeout).build();
+
+		model.call(new ModerationPrompt("hi", options));
+
+		ArgumentCaptor<RequestOptions> argumentCaptor = ArgumentCaptor.forClass(RequestOptions.class);
+		verify(mockClient.moderations()).create(any(ModerationCreateParams.class), argumentCaptor.capture());
+		RequestOptions value = argumentCaptor.getValue();
+		assertThat(value.getTimeout()).isNotNull();
+		assertThat(value.getTimeout().request()).isEqualTo(expectedTimeout);
 	}
 
 }

@@ -16,9 +16,8 @@
 
 package org.springframework.ai.mcp.server.webmvc.transport;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -28,6 +27,7 @@ import org.springframework.web.servlet.function.ServerRequest;
  * Utility class for working with HTTP headers. Internal use only.
  *
  * @author Daniel Garnier-Moiroux
+ * @author Yanming Zhou
  */
 final class HeaderUtils {
 
@@ -37,14 +37,9 @@ final class HeaderUtils {
 	static Map<String, List<String>> collectHeaders(ServerRequest request) {
 		return request.headers()
 			.asHttpHeaders()
-			.headerNames()
+			.headerSet()
 			.stream()
-			.collect(Collectors.<String, String, List<String>>toUnmodifiableMap(String::toLowerCase,
-					name -> request.headers().header(name), (l1, l2) -> {
-						var merged = new ArrayList<>(l1);
-						merged.addAll(l2);
-						return Collections.unmodifiableList(merged);
-					}));
+			.collect(Collectors.toUnmodifiableMap(e -> e.getKey().toLowerCase(Locale.ROOT), Map.Entry::getValue));
 	}
 
 }

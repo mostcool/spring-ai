@@ -18,16 +18,18 @@ package org.springframework.ai.model.tool;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
+import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -36,6 +38,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.internal.ToolCallReactiveContextHolder;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProcessor;
@@ -56,11 +59,12 @@ import org.springframework.util.StringUtils;
  *
  * @author Thomas Vitale
  * @author chabinhwang
+ * @author Christian Tzolov
  * @since 1.0.0
  */
 public final class DefaultToolCallingManager implements ToolCallingManager {
 
-	private static final Logger logger = LoggerFactory.getLogger(DefaultToolCallingManager.class);
+	private static final Log logger = LogFactory.getLog(DefaultToolCallingManager.class);
 
 	// @formatter:off
 
@@ -76,11 +80,28 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 	private static final ToolExecutionExceptionProcessor DEFAULT_TOOL_EXECUTION_EXCEPTION_PROCESSOR
 			= DefaultToolExecutionExceptionProcessor.builder().build();
 
-	private static final String POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING
-			= "LLM may have adapted the tool name '{}', especially if the name was truncated due to length limits. If this is the case, you can customize the prefixing and processing logic using McpToolNamePrefixGenerator";
-
+	private static final String POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING_START = "LLM may have adapted the tool name '";
+	private static final String POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING_END
+			= "', especially if the name was truncated due to length limits. If this is the case, you can customize the prefixing and processing logic using McpToolNamePrefixGenerator";
 
 	// @formatter:on
+
+	/**
+	 * Default cap applied to every tool name unless overridden via
+	 * {@link Builder#maxCallsPerTool(String, int)}, exempted via
+	 * {@link Builder#excludeToolFromLimit(String)}, or disabled entirely via
+	 * {@link Builder#unlimitedCallsPerTool()}. Generous enough for legitimate iterative
+	 * tool use (pagination, retries) while still catching a runaway loop long before it
+	 * becomes expensive.
+	 */
+	public static final int DEFAULT_MAX_CALLS_PER_TOOL = 40;
+
+	/**
+	 * Default cap on the total number of tool calls, across all tools combined, allowed
+	 * within a turn, unless disabled entirely via
+	 * {@link Builder#unlimitedTotalToolCalls()}.
+	 */
+	public static final int DEFAULT_MAX_TOTAL_TOOL_CALLS = 150;
 
 	private final ObservationRegistry observationRegistry;
 
@@ -88,43 +109,36 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 
 	private final ToolExecutionExceptionProcessor toolExecutionExceptionProcessor;
 
+	private final ToolCallLimits toolCallLimits;
+
 	private ToolCallingObservationConvention observationConvention = DEFAULT_OBSERVATION_CONVENTION;
 
 	public DefaultToolCallingManager(ObservationRegistry observationRegistry, ToolCallbackResolver toolCallbackResolver,
 			ToolExecutionExceptionProcessor toolExecutionExceptionProcessor) {
+		this(observationRegistry, toolCallbackResolver, toolExecutionExceptionProcessor,
+				new ToolCallLimits(DEFAULT_MAX_CALLS_PER_TOOL, Map.of(), Set.of(), DEFAULT_MAX_TOTAL_TOOL_CALLS,
+						ToolCallLimitBehavior.THROW));
+	}
+
+	DefaultToolCallingManager(ObservationRegistry observationRegistry, ToolCallbackResolver toolCallbackResolver,
+			ToolExecutionExceptionProcessor toolExecutionExceptionProcessor, ToolCallLimits toolCallLimits) {
 		Assert.notNull(observationRegistry, "observationRegistry cannot be null");
 		Assert.notNull(toolCallbackResolver, "toolCallbackResolver cannot be null");
 		Assert.notNull(toolExecutionExceptionProcessor, "toolCallExceptionConverter cannot be null");
+		Assert.notNull(toolCallLimits, "toolCallLimits cannot be null");
 
 		this.observationRegistry = observationRegistry;
 		this.toolCallbackResolver = toolCallbackResolver;
 		this.toolExecutionExceptionProcessor = toolExecutionExceptionProcessor;
+		this.toolCallLimits = toolCallLimits;
 	}
 
 	@Override
 	public List<ToolDefinition> resolveToolDefinitions(ToolCallingChatOptions chatOptions) {
 		Assert.notNull(chatOptions, "chatOptions cannot be null");
 
-		List<ToolCallback> toolCallbacks = new ArrayList<>(chatOptions.getToolCallbacks());
-		Set<String> existingToolNames = chatOptions.getToolCallbacks()
-			.stream()
-			.map(tool -> tool.getToolDefinition().name())
-			.collect(Collectors.toSet());
-
-		for (String toolName : chatOptions.getToolNames()) {
-			// Skip the tool if it is already present in the request toolCallbacks.
-			// That might happen if a tool is defined in the options
-			// both as a ToolCallback and as a tool name.
-			if (existingToolNames.contains(toolName)) {
-				continue;
-			}
-			ToolCallback toolCallback = this.toolCallbackResolver.resolve(toolName);
-			if (toolCallback == null) {
-				logger.warn(POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING, toolName);
-				throw new IllegalStateException("No ToolCallback found for tool name: " + toolName);
-			}
-			toolCallbacks.add(toolCallback);
-		}
+		List<ToolCallback> toolCallbacks = new ArrayList<>(
+				!CollectionUtils.isEmpty(chatOptions.getToolCallbacks()) ? chatOptions.getToolCallbacks() : List.of());
 
 		return toolCallbacks.stream().map(ToolCallback::getToolDefinition).toList();
 	}
@@ -177,25 +191,61 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 			ToolContext toolContext) {
 		List<ToolCallback> toolCallbacks = List.of();
 		if (prompt.getOptions() instanceof ToolCallingChatOptions toolCallingChatOptions) {
-			toolCallbacks = toolCallingChatOptions.getToolCallbacks();
+			if (!CollectionUtils.isEmpty(toolCallingChatOptions.getToolCallbacks())) {
+				toolCallbacks = toolCallingChatOptions.getToolCallbacks();
+			}
 		}
 
 		List<ToolResponseMessage.ToolResponse> toolResponses = new ArrayList<>();
 
 		Boolean returnDirect = null;
 
+		Map<String, Integer> toolCallCounts = ToolCallLimits.countPriorToolCalls(prompt.getInstructions());
+		int totalToolCallCount = toolCallCounts.values().stream().mapToInt(Integer::intValue).sum();
+
 		for (AssistantMessage.ToolCall toolCall : assistantMessage.getToolCalls()) {
 
-			logger.debug("Executing tool call: {}", toolCall.name());
+			if (logger.isDebugEnabled()) {
+				logger.debug("Executing tool call: " + toolCall.name());
+			}
 
 			String toolName = toolCall.name();
+
+			totalToolCallCount++;
+			int toolCallCount = toolCallCounts.merge(toolName, 1, Integer::sum);
+
+			ToolCallLimits.Breach limitBreach = this.toolCallLimits.check(toolName, toolCallCount, totalToolCallCount);
+			if (limitBreach != null) {
+				toolResponses.add(new ToolResponseMessage.ToolResponse(toolCall.id(), toolName, limitBreach.message()));
+
+				if (this.toolCallLimits.onLimitExceeded() == ToolCallLimitBehavior.THROW) {
+					ToolResponseMessage partialToolResponseMessage = ToolResponseMessage.builder()
+						.responses(toolResponses)
+						.build();
+					List<Message> partialConversationHistory = buildConversationHistoryAfterToolExecution(
+							prompt.getInstructions(), assistantMessage, partialToolResponseMessage);
+					ToolExecutionResult partialToolExecutionResult = ToolExecutionResult.builder()
+						.conversationHistory(partialConversationHistory)
+						.returnDirect(Objects.requireNonNullElse(returnDirect, false))
+						.build();
+					throw new ToolCallLimitExceededException(limitBreach.toolName(), limitBreach.limit(),
+							partialToolExecutionResult);
+				}
+
+				// ToolCallLimitBehavior.RETURN_ERROR_RESPONSE: skip invoking this tool
+				// call but keep processing the rest of the batch.
+				continue;
+			}
+
 			String toolInputArguments = toolCall.arguments();
 
 			// Handle the possible null parameter situation in streaming mode.
 			final String finalToolInputArguments;
 			if (!StringUtils.hasText(toolInputArguments)) {
-				logger.warn("Tool call arguments are null or empty for tool: {}. Using empty JSON object as default.",
-						toolName);
+				if (logger.isWarnEnabled()) {
+					logger.warn("Tool call arguments are null or empty for tool: " + toolName
+							+ ". Using empty JSON object as default.");
+				}
 				finalToolInputArguments = "{}";
 			}
 			else {
@@ -208,7 +258,10 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 				.orElseGet(() -> this.toolCallbackResolver.resolve(toolName));
 
 			if (toolCallback == null) {
-				logger.warn(POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING, toolName);
+				if (logger.isWarnEnabled()) {
+					logger.warn(POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING_START + toolName
+							+ POSSIBLE_LLM_TOOL_NAME_CHANGE_WARNING_END);
+				}
 				throw new IllegalStateException("No ToolCallback found for tool name: " + toolName);
 			}
 
@@ -218,6 +271,13 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 			else {
 				returnDirect = returnDirect && toolCallback.getToolMetadata().returnDirect();
 			}
+
+			// In streaming/reactive mode the parent observation is propagated through the
+			// Reactor context captured in ToolCallReactiveContextHolder. In blocking mode
+			// that holder is never populated, so fall back to the observation currently
+			// in scope on the calling thread to keep the observation hierarchy intact.
+			Observation parent = ToolCallReactiveContextHolder.getContext()
+				.getOrDefault(ObservationThreadLocalAccessor.KEY, this.observationRegistry.getCurrentObservation());
 
 			ToolCallingObservationContext observationContext = ToolCallingObservationContext.builder()
 				.toolDefinition(toolCallback.getToolDefinition())
@@ -230,6 +290,7 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 			String toolCallResult = ToolCallingObservationDocumentation.TOOL_CALL
 				.observation(this.observationConvention, DEFAULT_OBSERVATION_CONVENTION, () -> observationContext,
 						this.observationRegistry)
+				.parentObservation(parent)
 				.observe(() -> {
 					String toolResult;
 					try {
@@ -277,6 +338,16 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 
 		private ToolExecutionExceptionProcessor toolExecutionExceptionProcessor = DEFAULT_TOOL_EXECUTION_EXCEPTION_PROCESSOR;
 
+		private int defaultMaxCallsPerTool = DEFAULT_MAX_CALLS_PER_TOOL;
+
+		private final Map<String, Integer> maxCallsPerTool = new HashMap<>();
+
+		private final Set<String> toolsExcludedFromLimit = new HashSet<>();
+
+		private int maxTotalToolCalls = DEFAULT_MAX_TOTAL_TOOL_CALLS;
+
+		private ToolCallLimitBehavior onLimitExceeded = ToolCallLimitBehavior.THROW;
+
 		private Builder() {
 		}
 
@@ -296,9 +367,92 @@ public final class DefaultToolCallingManager implements ToolCallingManager {
 			return this;
 		}
 
+		/**
+		 * Default maximum number of times any single tool can be called within a turn,
+		 * unless overridden for a specific tool name via
+		 * {@link #maxCallsPerTool(String, int)} or exempted via
+		 * {@link #excludeToolFromLimit(String)}. Defaults to
+		 * {@link DefaultToolCallingManager#DEFAULT_MAX_CALLS_PER_TOOL}; call
+		 * {@link #unlimitedCallsPerTool()} to disable this limit entirely.
+		 */
+		public Builder maxCallsPerTool(int maxCallsPerTool) {
+			Assert.isTrue(maxCallsPerTool > 0, "maxCallsPerTool must be greater than 0");
+			this.defaultMaxCallsPerTool = maxCallsPerTool;
+			return this;
+		}
+
+		/**
+		 * Disable the per-tool call limit entirely, undoing {@link #maxCallsPerTool(int)}
+		 * (or the {@link DefaultToolCallingManager#DEFAULT_MAX_CALLS_PER_TOOL} default),
+		 * so that, absent a specific {@link #maxCallsPerTool(String, int)} override, any
+		 * tool can be called an unlimited number of times.
+		 */
+		public Builder unlimitedCallsPerTool() {
+			this.defaultMaxCallsPerTool = ToolCallLimits.NO_LIMIT;
+			return this;
+		}
+
+		/**
+		 * Maximum number of times the named tool can be called within a turn, overriding
+		 * the default set via {@link #maxCallsPerTool(int)} for that tool only.
+		 */
+		public Builder maxCallsPerTool(String toolName, int maxCallsPerTool) {
+			Assert.hasText(toolName, "toolName cannot be null or empty");
+			Assert.isTrue(maxCallsPerTool > 0, "maxCallsPerTool must be greater than 0");
+			this.maxCallsPerTool.put(toolName, maxCallsPerTool);
+			this.toolsExcludedFromLimit.remove(toolName);
+			return this;
+		}
+
+		/**
+		 * Exempt the named tool from the per-tool call limit, so it can be called an
+		 * unlimited number of times regardless of {@link #maxCallsPerTool(int)} or a
+		 * prior {@link #maxCallsPerTool(String, int)} override for that tool. Calls to
+		 * this tool still count toward {@link #maxTotalToolCalls(int)}.
+		 */
+		public Builder excludeToolFromLimit(String toolName) {
+			Assert.hasText(toolName, "toolName cannot be null or empty");
+			this.toolsExcludedFromLimit.add(toolName);
+			this.maxCallsPerTool.remove(toolName);
+			return this;
+		}
+
+		/**
+		 * Maximum number of tool calls, across all tools combined, allowed within a turn.
+		 * Defaults to {@link DefaultToolCallingManager#DEFAULT_MAX_TOTAL_TOOL_CALLS};
+		 * call {@link #unlimitedTotalToolCalls()} to disable this limit entirely.
+		 */
+		public Builder maxTotalToolCalls(int maxTotalToolCalls) {
+			Assert.isTrue(maxTotalToolCalls > 0, "maxTotalToolCalls must be greater than 0");
+			this.maxTotalToolCalls = maxTotalToolCalls;
+			return this;
+		}
+
+		/**
+		 * Disable the total tool call limit entirely, undoing
+		 * {@link #maxTotalToolCalls(int)} (or the
+		 * {@link DefaultToolCallingManager#DEFAULT_MAX_TOTAL_TOOL_CALLS} default).
+		 */
+		public Builder unlimitedTotalToolCalls() {
+			this.maxTotalToolCalls = ToolCallLimits.NO_LIMIT;
+			return this;
+		}
+
+		/**
+		 * What to do when a configured limit is exceeded. Defaults to
+		 * {@link ToolCallLimitBehavior#THROW}.
+		 */
+		public Builder onLimitExceeded(ToolCallLimitBehavior onLimitExceeded) {
+			Assert.notNull(onLimitExceeded, "onLimitExceeded cannot be null");
+			this.onLimitExceeded = onLimitExceeded;
+			return this;
+		}
+
 		public DefaultToolCallingManager build() {
+			ToolCallLimits toolCallLimits = new ToolCallLimits(this.defaultMaxCallsPerTool, this.maxCallsPerTool,
+					this.toolsExcludedFromLimit, this.maxTotalToolCalls, this.onLimitExceeded);
 			return new DefaultToolCallingManager(this.observationRegistry, this.toolCallbackResolver,
-					this.toolExecutionExceptionProcessor);
+					this.toolExecutionExceptionProcessor, toolCallLimits);
 		}
 
 	}

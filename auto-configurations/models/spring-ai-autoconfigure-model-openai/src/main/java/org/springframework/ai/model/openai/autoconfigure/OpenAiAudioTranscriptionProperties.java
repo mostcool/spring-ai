@@ -19,6 +19,7 @@ package org.springframework.ai.model.openai.autoconfigure;
 import java.util.List;
 
 import com.openai.models.audio.AudioResponseFormat;
+import com.openai.models.audio.transcriptions.TranscriptionCreateParams;
 import com.openai.models.audio.transcriptions.TranscriptionCreateParams.TimestampGranularity;
 import org.jspecify.annotations.Nullable;
 
@@ -39,9 +40,9 @@ public class OpenAiAudioTranscriptionProperties extends AbstractOpenAiProperties
 
 	public static final String CONFIG_PREFIX = "spring.ai.openai.audio.transcription";
 
-	private @Nullable String model = OpenAiAudioTranscriptionOptions.DEFAULT_TRANSCRIPTION_MODEL;
+	private @Nullable String model;
 
-	private AudioResponseFormat responseFormat = OpenAiAudioTranscriptionOptions.DEFAULT_RESPONSE_FORMAT;
+	private @Nullable AudioResponseFormat responseFormat;
 
 	private @Nullable String prompt;
 
@@ -51,6 +52,14 @@ public class OpenAiAudioTranscriptionProperties extends AbstractOpenAiProperties
 
 	private @Nullable List<TimestampGranularity> timestampGranularities;
 
+	private @Nullable Boolean diarizedJsonWorkaroundEnabled;
+
+	private @Nullable String chunkingStrategy;
+
+	private @Nullable List<String> knownSpeakerNames;
+
+	private @Nullable List<String> knownSpeakerReferences;
+
 	public @Nullable String getModel() {
 		return this.model;
 	}
@@ -59,11 +68,11 @@ public class OpenAiAudioTranscriptionProperties extends AbstractOpenAiProperties
 		this.model = model;
 	}
 
-	public AudioResponseFormat getResponseFormat() {
+	public @Nullable AudioResponseFormat getResponseFormat() {
 		return this.responseFormat;
 	}
 
-	public void setResponseFormat(AudioResponseFormat responseFormat) {
+	public void setResponseFormat(@Nullable AudioResponseFormat responseFormat) {
 		this.responseFormat = responseFormat;
 	}
 
@@ -99,23 +108,75 @@ public class OpenAiAudioTranscriptionProperties extends AbstractOpenAiProperties
 		this.timestampGranularities = timestampGranularities;
 	}
 
+	public @Nullable Boolean getDiarizedJsonWorkaroundEnabled() {
+		return this.diarizedJsonWorkaroundEnabled;
+	}
+
+	public void setDiarizedJsonWorkaroundEnabled(@Nullable Boolean diarizedJsonWorkaroundEnabled) {
+		this.diarizedJsonWorkaroundEnabled = diarizedJsonWorkaroundEnabled;
+	}
+
+	/**
+	 * Controls how the audio is cut into chunks. Only {@code "auto"} is supported through
+	 * this property
+	 */
+	public @Nullable String getChunkingStrategy() {
+		return this.chunkingStrategy;
+	}
+
+	public void setChunkingStrategy(@Nullable String chunkingStrategy) {
+		this.chunkingStrategy = chunkingStrategy;
+	}
+
+	/**
+	 * Speaker identifiers (up to 4), positionally matching
+	 * {@link #getKnownSpeakerReferences()}. Only used with the
+	 * {@code gpt-4o-transcribe-diarize} model.
+	 */
+	public @Nullable List<String> getKnownSpeakerNames() {
+		return this.knownSpeakerNames;
+	}
+
+	public void setKnownSpeakerNames(@Nullable List<String> knownSpeakerNames) {
+		this.knownSpeakerNames = knownSpeakerNames;
+	}
+
+	/**
+	 * Audio samples (as data URLs) containing known speaker references, positionally
+	 * matching {@link #getKnownSpeakerNames()}. Only used with the
+	 * {@code gpt-4o-transcribe-diarize} model.
+	 */
+	public @Nullable List<String> getKnownSpeakerReferences() {
+		return this.knownSpeakerReferences;
+	}
+
+	public void setKnownSpeakerReferences(@Nullable List<String> knownSpeakerReferences) {
+		this.knownSpeakerReferences = knownSpeakerReferences;
+	}
+
 	public OpenAiAudioTranscriptionOptions toOptions() {
-		OpenAiAudioTranscriptionOptions.Builder builder = OpenAiAudioTranscriptionOptions.builder();
-		builder.model(this.getModel());
-		if (this.responseFormat != null) {
-			builder.responseFormat(this.responseFormat);
+		OpenAiAudioTranscriptionOptions.Builder builder = OpenAiAudioTranscriptionOptions.builder()
+			.model(this.model)
+			.responseFormat(this.responseFormat)
+			.prompt(this.prompt)
+			.language(this.language)
+			.temperature(this.temperature)
+			.timestampGranularities(this.timestampGranularities)
+			.knownSpeakerNames(this.knownSpeakerNames)
+			.knownSpeakerReferences(this.knownSpeakerReferences);
+		if (this.diarizedJsonWorkaroundEnabled != null) {
+			builder.diarizedJsonWorkaroundEnabled(this.diarizedJsonWorkaroundEnabled);
 		}
-		if (this.prompt != null) {
-			builder.prompt(this.prompt);
-		}
-		if (this.language != null) {
-			builder.language(this.language);
-		}
-		if (this.temperature != null) {
-			builder.temperature(this.temperature);
-		}
-		if (this.timestampGranularities != null) {
-			builder.timestampGranularities(this.timestampGranularities);
+		if (this.chunkingStrategy != null) {
+			if (!"auto".equalsIgnoreCase(this.chunkingStrategy)) {
+				throw new IllegalArgumentException(
+						"Unsupported spring.ai.openai.audio.transcription.chunking-strategy value: '"
+								+ this.chunkingStrategy
+								+ "'. Only 'auto' is supported through configuration properties; use "
+								+ "OpenAiAudioTranscriptionOptions.Builder#chunkingStrategy(...) programmatically "
+								+ "for voice-activity-detection tuning.");
+			}
+			builder.chunkingStrategy(TranscriptionCreateParams.ChunkingStrategy.ofAuto());
 		}
 		return builder.build();
 	}
@@ -146,11 +207,11 @@ public class OpenAiAudioTranscriptionProperties extends AbstractOpenAiProperties
 
 		@DeprecatedConfigurationProperty(replacement = "spring.ai.openai.audio.transcription.response-format")
 		@Deprecated(since = "2.0.0", forRemoval = true)
-		public AudioResponseFormat getResponseFormat() {
+		public @Nullable AudioResponseFormat getResponseFormat() {
 			return OpenAiAudioTranscriptionProperties.this.getResponseFormat();
 		}
 
-		public void setResponseFormat(AudioResponseFormat responseFormat) {
+		public void setResponseFormat(@Nullable AudioResponseFormat responseFormat) {
 			OpenAiAudioTranscriptionProperties.this.setResponseFormat(responseFormat);
 		}
 

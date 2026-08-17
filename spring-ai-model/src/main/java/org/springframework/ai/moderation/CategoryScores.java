@@ -18,6 +18,8 @@ package org.springframework.ai.moderation;
 
 import java.util.Objects;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * This class represents the scores for different categories of content. Each category has
  * a score ranging from 0.0 to 1.0. The scores represent the severity or intensity of the
@@ -27,6 +29,7 @@ import java.util.Objects;
  * @author Ilayaperumal Gopinathan
  * @author Ricken Bazolo
  * @author Jonghoon Park
+ * @author Nicolas Krier
  * @since 1.0.0
  */
 public final class CategoryScores {
@@ -53,7 +56,15 @@ public final class CategoryScores {
 
 	private final double violence;
 
+	// Use criminal and dangerous attributes instead of it.
+	@Deprecated(since = "2.0.1", forRemoval = true)
 	private final double dangerousAndCriminalContent;
+
+	private final double criminal;
+
+	private final double dangerous;
+
+	private final double jailbreaking;
 
 	private final double health;
 
@@ -76,6 +87,9 @@ public final class CategoryScores {
 		this.harassmentThreatening = builder.harassmentThreatening;
 		this.violence = builder.violence;
 		this.dangerousAndCriminalContent = builder.dangerousAndCriminalContent;
+		this.criminal = builder.criminal;
+		this.dangerous = builder.dangerous;
+		this.jailbreaking = builder.jailbreaking;
 		this.health = builder.health;
 		this.financial = builder.financial;
 		this.law = builder.law;
@@ -130,8 +144,31 @@ public final class CategoryScores {
 		return this.violence;
 	}
 
+	// Use criminal and dangerous getters instead of it.
+	@Deprecated(since = "2.0.1", forRemoval = true)
 	public double getDangerousAndCriminalContent() {
 		return this.dangerousAndCriminalContent;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public double getCriminal() {
+		return this.criminal;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public double getDangerous() {
+		return this.dangerous;
+	}
+
+	/**
+	 * @since 2.0.1
+	 */
+	public double getJailbreaking() {
+		return this.jailbreaking;
 	}
 
 	public double getHealth() {
@@ -151,7 +188,7 @@ public final class CategoryScores {
 	}
 
 	@Override
-	public boolean equals(Object o) {
+	public boolean equals(@Nullable Object o) {
 		if (this == o) {
 			return true;
 		}
@@ -169,6 +206,9 @@ public final class CategoryScores {
 				&& Double.compare(that.harassmentThreatening, this.harassmentThreatening) == 0
 				&& Double.compare(that.violence, this.violence) == 0
 				&& Double.compare(that.dangerousAndCriminalContent, this.dangerousAndCriminalContent) == 0
+				&& Double.compare(that.criminal, this.criminal) == 0
+				&& Double.compare(that.dangerous, this.dangerous) == 0
+				&& Double.compare(that.jailbreaking, this.jailbreaking) == 0
 				&& Double.compare(that.health, this.health) == 0 && Double.compare(that.financial, this.financial) == 0
 				&& Double.compare(that.law, this.law) == 0 && Double.compare(that.pii, this.pii) == 0;
 	}
@@ -177,8 +217,8 @@ public final class CategoryScores {
 	public int hashCode() {
 		return Objects.hash(this.sexual, this.hate, this.harassment, this.selfHarm, this.sexualMinors,
 				this.hateThreatening, this.violenceGraphic, this.selfHarmIntent, this.selfHarmInstructions,
-				this.harassmentThreatening, this.violence, this.dangerousAndCriminalContent, this.health,
-				this.financial, this.law, this.pii);
+				this.harassmentThreatening, this.violence, this.dangerousAndCriminalContent, this.criminal,
+				this.dangerous, this.jailbreaking, this.health, this.financial, this.law, this.pii);
 	}
 
 	@Override
@@ -188,7 +228,8 @@ public final class CategoryScores {
 				+ this.hateThreatening + ", violenceGraphic=" + this.violenceGraphic + ", selfHarmIntent="
 				+ this.selfHarmIntent + ", selfHarmInstructions=" + this.selfHarmInstructions
 				+ ", harassmentThreatening=" + this.harassmentThreatening + ", violence=" + this.violence
-				+ ", dangerousAndCriminalContent=" + this.dangerousAndCriminalContent + ", health=" + this.health
+				+ ", dangerousAndCriminalContent=" + this.dangerousAndCriminalContent + ", criminal=" + this.criminal
+				+ ", dangerous=" + this.dangerous + ", jailbreaking=" + this.jailbreaking + ", health=" + this.health
 				+ ", financial=" + this.financial + ", law=" + this.law + ", pii=" + this.pii + '}';
 	}
 
@@ -216,7 +257,15 @@ public final class CategoryScores {
 
 		private double violence;
 
+		// Use criminal and dangerous attributes instead of it.
+		@Deprecated(since = "2.0.1", forRemoval = true)
 		private double dangerousAndCriminalContent;
+
+		private double criminal;
+
+		private double dangerous;
+
+		private double jailbreaking;
 
 		private double health;
 
@@ -281,8 +330,34 @@ public final class CategoryScores {
 			return this;
 		}
 
+		// Use criminal and dangerous building methods instead of it.
+		@Deprecated(since = "2.0.1", forRemoval = true)
 		public Builder dangerousAndCriminalContent(double dangerousAndCriminalContent) {
 			this.dangerousAndCriminalContent = dangerousAndCriminalContent;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder criminal(double criminal) {
+			this.criminal = criminal;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder dangerous(double dangerous) {
+			this.dangerous = dangerous;
+			return this;
+		}
+
+		/**
+		 * @since 2.0.1
+		 */
+		public Builder jailbreaking(double jailbreaking) {
+			this.jailbreaking = jailbreaking;
 			return this;
 		}
 

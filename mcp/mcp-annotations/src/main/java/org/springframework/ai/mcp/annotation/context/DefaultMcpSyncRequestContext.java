@@ -35,26 +35,25 @@ import io.modelcontextprotocol.spec.McpSchema.LoggingMessageNotification;
 import io.modelcontextprotocol.spec.McpSchema.ProgressNotification;
 import io.modelcontextprotocol.util.Assert;
 import io.modelcontextprotocol.util.Utils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import tools.jackson.core.type.TypeReference;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
-import org.springframework.ai.mcp.annotation.method.tool.utils.McpJsonParser;
 import org.springframework.ai.mcp.annotation.method.tool.utils.McpJsonSchemaGenerator;
-import org.springframework.ai.util.json.JsonParser;
+import org.springframework.ai.util.JsonHelper;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.util.ConcurrentReferenceHashMap;
 
 /**
  * @author Christian Tzolov
+ * @author Sebastien Deleuze
  */
 public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext {
 
-	private static final Logger logger = LoggerFactory.getLogger(DefaultMcpSyncRequestContext.class);
+	private static final JsonHelper jsonHelper = new JsonHelper();
+
+	private static final Log logger = LogFactory.getLog(DefaultMcpSyncRequestContext.class);
 
 	private static final Map<Type, Map<String, Object>> typeSchemaCache = new ConcurrentReferenceHashMap<>(256);
-
-	private static TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<Map<String, Object>>() {
-	};
 
 	private final McpSchema.Request request;
 
@@ -107,12 +106,12 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 			return new StructuredElicitResult<>(elicitResult.action(), null, elicitResult.meta());
 		}
 
-		return new StructuredElicitResult<>(elicitResult.action(), McpJsonParser.fromMap(elicitResult.content(), type),
-				elicitResult.meta());
+		return new StructuredElicitResult<>(elicitResult.action(),
+				jsonHelper.convertFromMap(elicitResult.content(), type), elicitResult.meta());
 	}
 
 	@Override
-	public <T> StructuredElicitResult<T> elicit(TypeReference<T> type) {
+	public <T> StructuredElicitResult<T> elicit(ParameterizedTypeReference<T> type) {
 
 		if (!this.elicitEnabled()) {
 			throw new IllegalStateException(
@@ -130,7 +129,7 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 
 		return new StructuredElicitResult<>(elicitResult.action(),
 
-				McpJsonParser.fromMap(elicitResult.content(), type), elicitResult.meta());
+				jsonHelper.convertFromMap(elicitResult.content(), type), elicitResult.meta());
 	}
 
 	@Override
@@ -155,11 +154,12 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 		}
 
 		return new StructuredElicitResult<>(elicitResult.action(),
-				McpJsonParser.fromMap(elicitResult.content(), returnType), elicitResult.meta());
+				jsonHelper.convertFromMap(elicitResult.content(), returnType), elicitResult.meta());
 	}
 
 	@Override
-	public <T> StructuredElicitResult<T> elicit(Consumer<ElicitationSpec> params, TypeReference<T> returnType) {
+	public <T> StructuredElicitResult<T> elicit(Consumer<ElicitationSpec> params,
+			ParameterizedTypeReference<T> returnType) {
 
 		if (!this.elicitEnabled()) {
 			throw new IllegalStateException(
@@ -180,7 +180,7 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 		}
 
 		return new StructuredElicitResult<>(elicitResult.action(),
-				McpJsonParser.fromMap(elicitResult.content(), returnType), elicitResult.meta());
+				jsonHelper.convertFromMap(elicitResult.content(), returnType), elicitResult.meta());
 	}
 
 	@Override
@@ -212,7 +212,7 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 	}
 
 	private Map<String, Object> generateElicitSchema(Type type) {
-		Map<String, Object> schema = JsonParser.fromJson(McpJsonSchemaGenerator.generateFromType(type), MAP_TYPE_REF);
+		Map<String, Object> schema = jsonHelper.fromJsonToMap(McpJsonSchemaGenerator.generateFromType(type));
 		// remove $schema as elicitation schema does not support it
 		schema.remove("$schema");
 		return schema;
@@ -245,12 +245,11 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 
 		var progressToken = this.request.progressToken();
 
-		return this.sample(McpSchema.CreateMessageRequest.builder()
-			.messages(spec.messages)
+		return this.sample(McpSchema.CreateMessageRequest
+			.builder(spec.messages, spec.maxTokens != null && spec.maxTokens > 0 ? spec.maxTokens : 500)
 			.modelPreferences(spec.modelPreferences)
 			.systemPrompt(spec.systemPrompt)
 			.temperature(spec.temperature)
-			.maxTokens(spec.maxTokens != null && spec.maxTokens > 0 ? spec.maxTokens : 500)
 			.stopSequences(spec.stopSequences.isEmpty() ? null : spec.stopSequences)
 			.includeContext(spec.includeContextStrategy)
 			.meta(spec.metadata.isEmpty() ? null : spec.metadata)
@@ -315,9 +314,7 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 		DefaultLoggingSpec spec = new DefaultLoggingSpec();
 		logSpec.accept(spec);
 
-		this.exchange.loggingNotification(LoggingMessageNotification.builder()
-			.data(spec.message)
-			.level(spec.level)
+		this.exchange.loggingNotification(LoggingMessageNotification.builder(spec.level, spec.message)
 			.logger(spec.logger)
 			.meta(spec.meta)
 			.build());
@@ -345,7 +342,7 @@ public final class DefaultMcpSyncRequestContext implements McpSyncRequestContext
 
 	private void logInternal(String message, LoggingLevel level) {
 		Assert.hasText(message, "Log message must not be empty");
-		this.exchange.loggingNotification(LoggingMessageNotification.builder().data(message).level(level).build());
+		this.exchange.loggingNotification(LoggingMessageNotification.builder(level, message).build());
 	}
 
 	// Getters

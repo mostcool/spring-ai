@@ -16,17 +16,19 @@
 
 package org.springframework.ai.model.anthropic.autoconfigure;
 
+import java.util.List;
+
 import com.anthropic.client.AnthropicClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 
 import org.springframework.ai.anthropic.AnthropicChatModel;
 import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.http.okhttp.AnthropicHttpClientBuilderCustomizer;
 import org.springframework.ai.chat.observation.ChatModelObservationConvention;
 import org.springframework.ai.model.SpringAIModelProperties;
 import org.springframework.ai.model.SpringAIModels;
-import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
 import org.springframework.ai.model.tool.ToolCallingManager;
-import org.springframework.ai.model.tool.ToolExecutionEligibilityPredicate;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -40,6 +42,7 @@ import org.springframework.context.annotation.Bean;
  *
  * @author Soby Chacko
  * @author Sebastien Deleuze
+ * @author Ilayaperumal Gopinathan
  * @since 2.0.0
  */
 @AutoConfiguration
@@ -53,9 +56,9 @@ public class AnthropicChatAutoConfiguration {
 	@ConditionalOnMissingBean
 	public AnthropicChatModel anthropicChatModel(AnthropicConnectionProperties connectionProperties,
 			AnthropicChatProperties chatProperties, ToolCallingManager toolCallingManager,
-			ObjectProvider<ObservationRegistry> observationRegistry,
+			ObjectProvider<ObservationRegistry> observationRegistry, ObjectProvider<MeterRegistry> meterRegistry,
 			ObjectProvider<ChatModelObservationConvention> observationConvention,
-			ObjectProvider<ToolExecutionEligibilityPredicate> anthropicToolExecutionEligibilityPredicate) {
+			ObjectProvider<AnthropicHttpClientBuilderCustomizer> httpClientBuilderCustomizers) {
 
 		AnthropicChatOptions.Builder builder = chatProperties.toOptions().mutate();
 		if (connectionProperties.getApiKey() != null) {
@@ -78,12 +81,14 @@ public class AnthropicChatAutoConfiguration {
 		}
 		AnthropicChatOptions options = builder.build();
 
+		List<AnthropicHttpClientBuilderCustomizer> customizers = httpClientBuilderCustomizers.orderedStream().toList();
+
 		var chatModel = AnthropicChatModel.builder()
 			.options(options)
 			.toolCallingManager(toolCallingManager)
 			.observationRegistry(observationRegistry.getIfUnique(() -> ObservationRegistry.NOOP))
-			.toolExecutionEligibilityPredicate(anthropicToolExecutionEligibilityPredicate
-				.getIfUnique(DefaultToolExecutionEligibilityPredicate::new))
+			.meterRegistry(chatProperties.isConnectionPoolMetricsEnabled() ? meterRegistry.getIfAvailable() : null)
+			.httpClientBuilderCustomizers(customizers)
 			.build();
 
 		observationConvention.ifAvailable(chatModel::setObservationConvention);

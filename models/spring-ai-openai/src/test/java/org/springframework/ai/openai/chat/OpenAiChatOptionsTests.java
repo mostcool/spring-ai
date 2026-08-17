@@ -16,12 +16,13 @@
 
 package org.springframework.ai.openai.chat;
 
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
+import com.openai.models.chat.completions.ChatCompletionAudioParam;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.ai.chat.prompt.ChatOptions;
@@ -40,6 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * @author Julien Dubois
  * @author Sebastien Deleuze
+ * @author guan xu
+ * @author Deepak Kumar S S
  */
 public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatOptions, Builder> {
 
@@ -74,7 +77,7 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 			.topLogprobs(5)
 			.maxTokens(100)
 			.maxCompletionTokens(50)
-			.N(2)
+			.n(2)
 			.presencePenalty(0.8)
 			.streamOptions(StreamOptions.builder().includeUsage(true).build())
 			.seed(12345)
@@ -88,7 +91,7 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 			.reasoningEffort("medium")
 			.verbosity("low")
 			.serviceTier("auto")
-			.internalToolExecutionEnabled(false)
+			.promptCacheKey("test-cache-key")
 			.customHeaders(customHeaders)
 			.toolContext(toolContext)
 			.extraBody(extraBody)
@@ -117,55 +120,10 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 		assertThat(options.getReasoningEffort()).isEqualTo("medium");
 		assertThat(options.getVerbosity()).isEqualTo("low");
 		assertThat(options.getServiceTier()).isEqualTo("auto");
-		assertThat(options.getInternalToolExecutionEnabled()).isFalse();
+		assertThat(options.getPromptCacheKey()).isEqualTo("test-cache-key");
 		assertThat(options.getCustomHeaders()).isEqualTo(customHeaders);
 		assertThat(options.getToolContext()).isEqualTo(toolContext);
 		assertThat(options.getExtraBody()).isEqualTo(extraBody);
-	}
-
-	@Test
-	void testCopy() {
-		Map<String, Integer> logitBias = new HashMap<>();
-		logitBias.put("token1", 1);
-
-		List<String> stop = List.of("stop1");
-		Map<String, String> metadata = Map.of("key1", "value1");
-
-		OpenAiChatOptions originalOptions = OpenAiChatOptions.builder()
-			.model("test-model")
-			.deploymentName("test-deployment")
-			.frequencyPenalty(0.5)
-			.logitBias(logitBias)
-			.logprobs(true)
-			.topLogprobs(5)
-			.maxCompletionTokens(50)
-			.N(2)
-			.presencePenalty(0.8)
-			.streamOptions(StreamOptions.builder().includeUsage(false).build())
-			.seed(12345)
-			.stop(stop)
-			.temperature(0.7)
-			.topP(0.9)
-			.user("test-user")
-			.parallelToolCalls(false)
-			.store(true)
-			.metadata(metadata)
-			.reasoningEffort("low")
-			.verbosity("high")
-			.serviceTier("default")
-			.internalToolExecutionEnabled(true)
-			.customHeaders(Map.of("header1", "value1"))
-			.build();
-
-		OpenAiChatOptions copiedOptions = originalOptions.copy();
-
-		assertThat(copiedOptions).isNotSameAs(originalOptions).isEqualTo(originalOptions);
-		// Verify collections are copied
-		assertThat(copiedOptions.getStop()).isNotSameAs(originalOptions.getStop());
-		assertThat(copiedOptions.getCustomHeaders()).isNotSameAs(originalOptions.getCustomHeaders());
-		assertThat(copiedOptions.getToolCallbacks()).isNotSameAs(originalOptions.getToolCallbacks());
-		assertThat(copiedOptions.getToolNames()).isNotSameAs(originalOptions.getToolNames());
-		assertThat(copiedOptions.getToolContext()).isNotSameAs(originalOptions.getToolContext());
 	}
 
 	@Test
@@ -198,7 +156,6 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 			.reasoningEffort("high")
 			.verbosity("medium")
 			.serviceTier("auto")
-			.internalToolExecutionEnabled(false)
 			.customHeaders(Map.of("header2", "value2"))
 			.build();
 
@@ -223,7 +180,6 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 		assertThat(options.getReasoningEffort()).isEqualTo("high");
 		assertThat(options.getVerbosity()).isEqualTo("medium");
 		assertThat(options.getServiceTier()).isEqualTo("auto");
-		assertThat(options.getInternalToolExecutionEnabled()).isFalse();
 		assertThat(options.getCustomHeaders()).isEqualTo(Map.of("header2", "value2"));
 	}
 
@@ -231,7 +187,7 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 	void testDefaultValues() {
 		OpenAiChatOptions options = OpenAiChatOptions.builder().build();
 
-		assertThat(options.getModel()).isNull();
+		assertThat(options.getModel()).isEqualTo(OpenAiChatOptions.DEFAULT_CHAT_MODEL);
 		assertThat(options.getDeploymentName()).isNull();
 		assertThat(options.getFrequencyPenalty()).isNull();
 		assertThat(options.getLogitBias()).isNull();
@@ -259,11 +215,9 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 		assertThat(options.getReasoningEffort()).isNull();
 		assertThat(options.getVerbosity()).isNull();
 		assertThat(options.getServiceTier()).isNull();
-		assertThat(options.getToolCallbacks()).isNotNull().isEmpty();
-		assertThat(options.getToolNames()).isNotNull().isEmpty();
-		assertThat(options.getInternalToolExecutionEnabled()).isNull();
-		assertThat(options.getCustomHeaders()).isNotNull().isEmpty();
-		assertThat(options.getToolContext()).isNotNull().isEmpty();
+		assertThat(options.getToolCallbacks()).isNull();
+		assertThat(options.getCustomHeaders()).isNull();
+		assertThat(options.getToolContext()).isNull();
 		assertThat(options.getOutputSchema()).isNull();
 	}
 
@@ -309,7 +263,7 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 			.extraBody(null)
 			.build();
 
-		assertThat(options.getModel()).isNull();
+		assertThat(options.getModel()).isEqualTo(OpenAiChatOptions.DEFAULT_CHAT_MODEL);
 		assertThat(options.getTemperature()).isNull();
 		assertThat(options.getLogitBias()).isNull();
 		assertThat(options.getStop()).isNull();
@@ -371,20 +325,6 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 		options = options.mutate().stopSequences(newStop).build();
 		assertThat(options.getStop()).isEqualTo(newStop);
 		assertThat(options.getStopSequences()).isEqualTo(newStop);
-	}
-
-	@Test
-	void testCopyChangeIndependence() {
-		OpenAiChatOptions original = OpenAiChatOptions.builder().model("original-model").temperature(0.5).build();
-
-		OpenAiChatOptions copied = original.copy();
-
-		// Modify original
-		original = original.mutate().model("modified-model").temperature(0.9).build();
-
-		// Verify copy is unchanged
-		assertThat(copied.getModel()).isEqualTo("original-model");
-		assertThat(copied.getTemperature()).isEqualTo(0.5);
 	}
 
 	@Test
@@ -473,13 +413,9 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 			}
 		};
 
-		OpenAiChatOptions options = OpenAiChatOptions.builder()
-			.toolCallbacks(callback1, callback2)
-			.toolNames("tool1", "tool2")
-			.build();
+		OpenAiChatOptions options = OpenAiChatOptions.builder().toolCallbacks(callback1, callback2).build();
 
 		assertThat(options.getToolCallbacks()).hasSize(2).containsExactly(callback1, callback2);
-		assertThat(options.getToolNames()).hasSize(2).contains("tool1", "tool2");
 	}
 
 	@Test
@@ -507,26 +443,10 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 	}
 
 	@Test
-	void testToolNamesSet() {
-		Set<String> toolNames = new HashSet<>(Set.of("tool1", "tool2", "tool3"));
-
-		OpenAiChatOptions options = OpenAiChatOptions.builder().toolNames(toolNames).build();
-
-		assertThat(options.getToolNames()).hasSize(3).containsExactlyInAnyOrder("tool1", "tool2", "tool3");
-	}
-
-	@Test
 	void testToolCallbacksBuilderValidation() {
 		// Test null validation
 		OpenAiChatOptions options1 = OpenAiChatOptions.builder().toolCallbacks((List<ToolCallback>) null).build();
-		assertThat(options1.getToolCallbacks()).isEmpty();
-	}
-
-	@Test
-	void testToolNamesBuilderValidation() {
-		// Test null validation
-		OpenAiChatOptions options1 = OpenAiChatOptions.builder().toolNames((Set<String>) null).build();
-		assertThat(options1.getToolNames()).isEmpty();
+		assertThat(options1.getToolCallbacks()).isNull();
 	}
 
 	@Test
@@ -543,17 +463,12 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 	@Test
 	void testCombineWithToolCallingChatOptions() {
 		OpenAiChatOptions merged = OpenAiChatOptions.builder()
-			.combineWith(ToolCallingChatOptions.builder()
-				.model("override-model")
-				.temperature(0.9)
-				.toolNames("tool1")
-				.internalToolExecutionEnabled(true))
+			.combineWith(ToolCallingChatOptions.builder().model("override-model").temperature(0.9))
 			.build();
 
 		assertThat(merged.getModel()).isEqualTo("override-model");
 		assertThat(merged.getTemperature()).isEqualTo(0.9);
-		assertThat(merged.getToolNames()).containsExactly("tool1");
-		assertThat(merged.getInternalToolExecutionEnabled()).isTrue();
+
 	}
 
 	@Test
@@ -670,16 +585,6 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 	}
 
 	@Test
-	void testToString() {
-		OpenAiChatOptions options = OpenAiChatOptions.builder().model("test-model").temperature(0.7).build();
-
-		String toString = options.toString();
-		assertThat(toString).contains("OpenAiChatOptions");
-		assertThat(toString).contains("test-model");
-		assertThat(toString).contains("0.7");
-	}
-
-	@Test
 	void testTopKReturnsNull() {
 		OpenAiChatOptions options = OpenAiChatOptions.builder().build();
 		// TopK is not supported by OpenAI, should always return null
@@ -706,7 +611,94 @@ public class OpenAiChatOptionsTests extends AbstractChatOptionsTests<OpenAiChatO
 		assertThat(options.getResponseFormat()).isNotNull();
 		assertThat(options.getResponseFormat().getType()).isEqualTo(ResponseFormat.Type.JSON_SCHEMA);
 		assertThat(options.getResponseFormat().getJsonSchema()).isEqualTo(schema);
+		assertThat(options.getResponseFormat().getStrict()).isNull();
 		assertThat(options.getOutputSchema()).isEqualTo(schema);
+	}
+
+	@Test
+	void testSetOutputSchemaWithStrictDisabled() {
+		OpenAiChatOptions options = OpenAiChatOptions.builder().build();
+		String schema = """
+				{
+					"type": "object",
+					"properties": {
+						"name": {
+							"type": "string"
+						}
+					}
+				}
+				""";
+
+		options = options.mutate()
+			.responseFormat(ResponseFormat.builder().jsonSchema(schema).strict(false).build())
+			.build();
+
+		assertThat(options.getResponseFormat()).isNotNull();
+		assertThat(options.getResponseFormat().getStrict()).isFalse();
+	}
+
+	@Test
+	void cloneCreatesIndependentCollections() {
+		Map<String, String> customHeaders = new HashMap<>();
+		customHeaders.put("key", "value");
+		Map<String, Integer> logitBias = new HashMap<>();
+		logitBias.put("key", 1);
+		List<String> outputModalities = new ArrayList<>();
+		outputModalities.add("text");
+		Map<String, String> metadata = new HashMap<>();
+		metadata.put("key", "value");
+		Map<String, Object> extraBody = new HashMap<>();
+		extraBody.put("key", "value");
+
+		Builder source = OpenAiChatOptions.builder()
+			.customHeaders(customHeaders)
+			.logitBias(logitBias)
+			.outputModalities(outputModalities)
+			.metadata(metadata)
+			.extraBody(extraBody);
+		Builder clone = source.clone();
+		customHeaders.put("anotherKey", "anotherValue");
+		logitBias.put("anotherKey", 2);
+		outputModalities.add("audio");
+		metadata.put("anotherKey", "anotherValue");
+		extraBody.put("anotherKey", "anotherValue");
+
+		OpenAiChatOptions cloned = clone.build();
+		assertThat(cloned.getCustomHeaders()).containsOnlyKeys("key");
+		assertThat(cloned.getLogitBias()).containsOnlyKeys("key");
+		assertThat(cloned.getOutputModalities()).containsExactly("text");
+		assertThat(cloned.getMetadata()).containsOnlyKeys("key");
+		assertThat(cloned.getExtraBody()).containsOnlyKeys("key");
+	}
+
+	@Test
+	void cloneHandlesNullCollections() {
+		OpenAiChatOptions cloned = OpenAiChatOptions.builder().clone().build();
+		assertThat(cloned.getCustomHeaders()).isNull();
+		assertThat(cloned.getLogitBias()).isNull();
+		assertThat(cloned.getOutputModalities()).isNull();
+		assertThat(cloned.getMetadata()).isNull();
+		assertThat(cloned.getExtraBody()).isNull();
+	}
+
+	@Test
+	void audioParametersAreSerializedLocaleIndependently() {
+		Locale defaultLocale = Locale.getDefault();
+		try {
+			// Under the Turkish locale, "SHIMMER".toLowerCase() yields "shımmer" (dotless
+			// 'ı'), which is not a valid OpenAI audio voice. Protocol enum values must be
+			// converted using a fixed locale so the wire value stays "shimmer".
+			Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+			OpenAiChatOptions.AudioParameters audioParameters = new OpenAiChatOptions.AudioParameters(
+					OpenAiChatOptions.AudioParameters.Voice.SHIMMER,
+					OpenAiChatOptions.AudioParameters.AudioResponseFormat.MP3);
+			ChatCompletionAudioParam audioParam = audioParameters.toChatCompletionAudioParam();
+			assertThat(audioParam.voice().asString()).isEqualTo("shimmer");
+			assertThat(audioParam.format().asString()).isEqualTo("mp3");
+		}
+		finally {
+			Locale.setDefault(defaultLocale);
+		}
 	}
 
 }

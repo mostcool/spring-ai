@@ -43,16 +43,13 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.ListOutputConverter;
 import org.springframework.ai.converter.MapOutputConverter;
-import org.springframework.ai.model.ModelOptionsUtils;
 import org.springframework.ai.model.tool.DefaultToolCallingManager;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.ollama.api.OllamaApi;
@@ -64,6 +61,7 @@ import org.springframework.ai.ollama.management.PullModelStrategy;
 import org.springframework.ai.retry.RetryUtils;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.util.JsonHelper;
 import org.springframework.ai.util.ResourceUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
@@ -76,6 +74,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest
 class OllamaChatModelIT extends BaseOllamaIT {
+
+	private static final JsonHelper jsonHelper = new JsonHelper();
 
 	private static final String MODEL = OllamaModel.QWEN_2_5_3B.getName();
 
@@ -115,7 +115,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 		UserMessage userMessage = new UserMessage("Tell me about 5 famous pirates from the Golden Age of Piracy.");
 
 		// portable/generic options
-		var portableOptions = ChatOptions.builder().temperature(0.7).build();
+		var portableOptions = OllamaChatOptions.builder().model(MODEL).temperature(0.0).build();
 
 		Prompt prompt = new Prompt(List.of(systemMessage, userMessage), portableOptions);
 
@@ -123,7 +123,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 		verifyMostFamousPiratePresence(response);
 
 		// ollama specific options
-		var ollamaOptions = OllamaChatOptions.builder().lowVRAM(true).build();
+		var ollamaOptions = OllamaChatOptions.builder().model(MODEL).lowVRAM(true).build();
 
 		response = this.chatModel.call(new Prompt(List.of(systemMessage, userMessage), ollamaOptions));
 		verifyMostFamousPiratePresence(response);
@@ -277,7 +277,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 				""");
 		Map<String, Object> model = Map.of("country", "denmark");
 		var prompt = userPromptTemplate.create(model,
-				OllamaChatOptions.builder().format(outputConverter.getJsonSchemaMap()).build());
+				OllamaChatOptions.builder().model(MODEL).format(outputConverter.getJsonSchemaMap()).build());
 
 		var chatResponse = this.chatModel.call(prompt);
 
@@ -292,7 +292,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 	@Test
 	void jsonStructuredOutputWithOutputSchemaOption() {
 		var jsonSchemaAsText = ResourceUtils.getText("classpath:country-json-schema.json");
-		var chatOptions = OllamaChatOptions.builder().outputSchema(jsonSchemaAsText).build();
+		var chatOptions = OllamaChatOptions.builder().model(MODEL).outputSchema(jsonSchemaAsText).build();
 		var prompt = new Prompt("Tell me about Canada.", chatOptions);
 
 		var chatResponse = this.chatModel.call(prompt);
@@ -337,7 +337,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 					.get(ChatClientAttributes.STRUCTURED_OUTPUT_SCHEMA.getKey());
 
 				if (Boolean.TRUE.equals(nativeFlag) && schemaString != null) {
-					var actualSchemaMap = ModelOptionsUtils.jsonToMap(schemaString);
+					var actualSchemaMap = jsonHelper.fromJsonToMap(schemaString);
 					if (expectedOutputSchemaMap.equals(actualSchemaMap)) {
 						nativeStructuredOutputUsed.set(true);
 					}
@@ -402,9 +402,9 @@ class OllamaChatModelIT extends BaseOllamaIT {
 		ChatMemory chatMemory = MessageWindowChatMemory.builder().build();
 		String conversationId = UUID.randomUUID().toString();
 
-		ChatOptions chatOptions = ToolCallingChatOptions.builder()
+		var chatOptions = OllamaChatOptions.builder()
+			.model(MODEL)
 			.toolCallbacks(ToolCallbacks.from(new MathTools()))
-			.internalToolExecutionEnabled(false)
 			.build();
 		Prompt prompt = new Prompt(
 				List.of(new SystemMessage("You are a helpful assistant."), new UserMessage("What is 6 * 8?")),
@@ -474,7 +474,7 @@ class OllamaChatModelIT extends BaseOllamaIT {
 		OllamaChatModel ollamaChat(OllamaApi ollamaApi) {
 			return OllamaChatModel.builder()
 				.ollamaApi(ollamaApi)
-				.defaultOptions(OllamaChatOptions.builder().model(MODEL).temperature(0.0).build())
+				.options(OllamaChatOptions.builder().model(MODEL).temperature(0.0).build())
 				.modelManagementOptions(ModelManagementOptions.builder()
 					.pullModelStrategy(PullModelStrategy.WHEN_MISSING)
 					.additionalModels(List.of(ADDITIONAL_MODEL))

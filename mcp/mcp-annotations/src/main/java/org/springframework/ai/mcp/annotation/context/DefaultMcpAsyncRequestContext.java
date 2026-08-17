@@ -35,14 +35,13 @@ import io.modelcontextprotocol.spec.McpSchema.LoggingMessageNotification;
 import io.modelcontextprotocol.spec.McpSchema.ProgressNotification;
 import io.modelcontextprotocol.util.Assert;
 import io.modelcontextprotocol.util.Utils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import reactor.core.publisher.Mono;
-import tools.jackson.core.type.TypeReference;
 
-import org.springframework.ai.mcp.annotation.method.tool.utils.McpJsonParser;
 import org.springframework.ai.mcp.annotation.method.tool.utils.McpJsonSchemaGenerator;
-import org.springframework.ai.util.json.JsonParser;
+import org.springframework.ai.util.JsonHelper;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.util.ConcurrentReferenceHashMap;
 
 /**
@@ -50,15 +49,15 @@ import org.springframework.util.ConcurrentReferenceHashMap;
  * types.
  *
  * @author Christian Tzolov
+ * @author Sebastien Deleuze
  */
 public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestContext {
 
-	private static final Logger logger = LoggerFactory.getLogger(DefaultMcpAsyncRequestContext.class);
+	private static final JsonHelper jsonHelper = new JsonHelper();
+
+	private static final Log logger = LogFactory.getLog(DefaultMcpAsyncRequestContext.class);
 
 	private static final Map<Type, Map<String, Object>> typeSchemaCache = new ConcurrentReferenceHashMap<>(256);
-
-	private static TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<Map<String, Object>>() {
-	};
 
 	private final McpSchema.Request request;
 
@@ -99,13 +98,14 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 	}
 
 	@Override
-	public <T> Mono<StructuredElicitResult<T>> elicit(Consumer<ElicitationSpec> spec, TypeReference<T> type) {
+	public <T> Mono<StructuredElicitResult<T>> elicit(Consumer<ElicitationSpec> spec,
+			ParameterizedTypeReference<T> type) {
 		Assert.notNull(type, "Elicitation response type must not be null");
 		Assert.notNull(spec, "Elicitation spec consumer must not be null");
 		DefaultElicitationSpec elicitationSpec = new DefaultElicitationSpec();
 		spec.accept(elicitationSpec);
 		return this.elicitationInternal(elicitationSpec.message, type.getType(), elicitationSpec.meta)
-			.map(er -> new StructuredElicitResult<T>(er.action(), McpJsonParser.fromMap(er.content(), type),
+			.map(er -> new StructuredElicitResult<T>(er.action(), jsonHelper.convertFromMap(er.content(), type),
 					er.meta()));
 	}
 
@@ -116,15 +116,15 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 		DefaultElicitationSpec elicitationSpec = new DefaultElicitationSpec();
 		spec.accept(elicitationSpec);
 		return this.elicitationInternal(elicitationSpec.message, type, elicitationSpec.meta)
-			.map(er -> new StructuredElicitResult<T>(er.action(), McpJsonParser.fromMap(er.content(), type),
+			.map(er -> new StructuredElicitResult<T>(er.action(), jsonHelper.convertFromMap(er.content(), type),
 					er.meta()));
 	}
 
 	@Override
-	public <T> Mono<StructuredElicitResult<T>> elicit(TypeReference<T> type) {
+	public <T> Mono<StructuredElicitResult<T>> elicit(ParameterizedTypeReference<T> type) {
 		Assert.notNull(type, "Elicitation response type must not be null");
 		return this.elicitationInternal("Please provide the required information.", type.getType(), null)
-			.map(er -> new StructuredElicitResult<T>(er.action(), McpJsonParser.fromMap(er.content(), type),
+			.map(er -> new StructuredElicitResult<T>(er.action(), jsonHelper.convertFromMap(er.content(), type),
 					er.meta()));
 	}
 
@@ -132,7 +132,7 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 	public <T> Mono<StructuredElicitResult<T>> elicit(Class<T> type) {
 		Assert.notNull(type, "Elicitation response type must not be null");
 		return this.elicitationInternal("Please provide the required information.", type, null)
-			.map(er -> new StructuredElicitResult<T>(er.action(), McpJsonParser.fromMap(er.content(), type),
+			.map(er -> new StructuredElicitResult<T>(er.action(), jsonHelper.convertFromMap(er.content(), type),
 					er.meta()));
 	}
 
@@ -162,7 +162,7 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 	}
 
 	private Map<String, Object> generateElicitSchema(Type type) {
-		Map<String, Object> schema = JsonParser.fromJson(McpJsonSchemaGenerator.generateFromType(type), MAP_TYPE_REF);
+		Map<String, Object> schema = jsonHelper.fromJsonToMap(McpJsonSchemaGenerator.generateFromType(type));
 		// remove as elicitation schema does not support it
 		schema.remove("$schema");
 		return schema;
@@ -192,12 +192,11 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 		if (progressToken == null || (progressToken instanceof String pt && !Utils.hasText(pt))) {
 			logger.warn("Progress notification not supported by the client!");
 		}
-		return this.sample(McpSchema.CreateMessageRequest.builder()
-			.messages(spec.messages)
+		return this.sample(McpSchema.CreateMessageRequest
+			.builder(spec.messages, spec.maxTokens != null && spec.maxTokens > 0 ? spec.maxTokens : 500)
 			.modelPreferences(spec.modelPreferences)
 			.systemPrompt(spec.systemPrompt)
 			.temperature(spec.temperature)
-			.maxTokens(spec.maxTokens != null && spec.maxTokens > 0 ? spec.maxTokens : 500)
 			.stopSequences(spec.stopSequences.isEmpty() ? null : spec.stopSequences)
 			.includeContext(spec.includeContextStrategy)
 			.meta(spec.metadata.isEmpty() ? null : spec.metadata)
@@ -266,9 +265,7 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 		logSpec.accept(spec);
 
 		return this.exchange
-			.loggingNotification(LoggingMessageNotification.builder()
-				.data(spec.message)
-				.level(spec.level)
+			.loggingNotification(LoggingMessageNotification.builder(spec.level, spec.message)
 				.logger(spec.logger)
 				.meta(spec.meta)
 				.build())
@@ -297,9 +294,7 @@ public final class DefaultMcpAsyncRequestContext implements McpAsyncRequestConte
 
 	private Mono<Void> logInternal(String message, LoggingLevel level) {
 		Assert.hasText(message, "Log message must not be empty");
-		return this.exchange
-			.loggingNotification(LoggingMessageNotification.builder().data(message).level(level).build())
-			.then();
+		return this.exchange.loggingNotification(LoggingMessageNotification.builder(level, message).build()).then();
 	}
 
 	// Getters

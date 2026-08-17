@@ -18,10 +18,14 @@ package org.springframework.ai.openai;
 
 import java.net.Proxy;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import com.openai.azure.AzureOpenAIServiceVersion;
+import com.openai.core.JsonValue;
 import com.openai.credential.Credential;
 import com.openai.models.embeddings.EmbeddingCreateParams;
 import com.openai.models.embeddings.EmbeddingModel;
@@ -37,6 +41,7 @@ import org.springframework.ai.embedding.EmbeddingOptions;
  * @author Christian Tzolov
  * @author Ilayaperumal Gopinathan
  * @author Sebastien Deleuze
+ * @author guan xu
  */
 public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements EmbeddingOptions {
 
@@ -59,17 +64,28 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 	 */
 	private final @Nullable Integer dimensions;
 
+	/**
+	 * Extra parameters that are not part of the standard OpenAI API. These parameters are
+	 * passed as additional body properties to support OpenAI-compatible providers like
+	 * vLLM, Ollama, Groq, etc. that support custom parameters such as top_k,
+	 * repetition_penalty, etc.
+	 */
+	private final @Nullable Map<String, Object> extraBody;
+
 	protected OpenAiEmbeddingOptions(@Nullable String baseUrl, @Nullable String apiKey, @Nullable Credential credential,
 			@Nullable String model, @Nullable String microsoftDeploymentName,
 			@Nullable AzureOpenAIServiceVersion microsoftFoundryServiceVersion, @Nullable String organizationId,
 			@Nullable Boolean isMicrosoftFoundry, @Nullable Boolean isGitHubModels, @Nullable Duration timeout,
 			@Nullable Integer maxRetries, @Nullable Proxy proxy, @Nullable Map<String, String> customHeaders,
-			@Nullable String user, @Nullable EncodingFormat encodingFormat, @Nullable Integer dimensions) {
-		super(baseUrl, apiKey, credential, model, microsoftDeploymentName, microsoftFoundryServiceVersion,
-				organizationId, isMicrosoftFoundry, isGitHubModels, timeout, maxRetries, proxy, customHeaders);
+			@Nullable String user, @Nullable EncodingFormat encodingFormat, @Nullable Integer dimensions,
+			@Nullable Map<String, Object> extraBody) {
+		super(baseUrl, apiKey, credential, model != null ? model : DEFAULT_EMBEDDING_MODEL, microsoftDeploymentName,
+				microsoftFoundryServiceVersion, organizationId, isMicrosoftFoundry, isGitHubModels, timeout, maxRetries,
+				proxy, customHeaders);
 		this.user = user;
 		this.encodingFormat = encodingFormat;
 		this.dimensions = dimensions;
+		this.extraBody = (extraBody != null ? Map.copyOf(extraBody) : null);
 	}
 
 	public static Builder builder() {
@@ -89,11 +105,8 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 		return this.dimensions;
 	}
 
-	@Override
-	public String toString() {
-		return "OpenAiEmbeddingOptions{" + "user='" + this.user + '\'' + ", model='" + this.getModel() + '\''
-				+ ", deploymentName='" + this.getDeploymentName() + '\'' + ", encodingFormat='" + this.encodingFormat
-				+ '\'' + ", dimensions=" + this.dimensions + '}';
+	public @Nullable Map<String, Object> getExtraBody() {
+		return this.extraBody;
 	}
 
 	public EmbeddingCreateParams toOpenAiCreateParams(List<String> instructions) {
@@ -121,6 +134,17 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 		if (this.getDimensions() != null) {
 			builder.dimensions(this.getDimensions());
 		}
+
+		// Add extraBody parameters as additional body properties for OpenAI-compatible
+		// providers
+		if (this.getExtraBody() != null && !this.getExtraBody().isEmpty()) {
+			Map<String, JsonValue> extraParams = this.getExtraBody()
+				.entrySet()
+				.stream()
+				.collect(Collectors.toMap(Map.Entry::getKey, entry -> JsonValue.from(entry.getValue())));
+			builder.additionalBodyProperties(extraParams);
+		}
+
 		return builder.build();
 	}
 
@@ -151,6 +175,8 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 
 		private @Nullable Integer dimensions;
 
+		private @Nullable Map<String, Object> extraBody;
+
 		public Builder from(OpenAiEmbeddingOptions fromOptions) {
 			// Parent class fields
 			this.baseUrl = fromOptions.getBaseUrl();
@@ -170,6 +196,7 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 			this.user = fromOptions.getUser();
 			this.encodingFormat = fromOptions.getEncodingFormat();
 			this.dimensions = fromOptions.getDimensions();
+			this.extraBody = fromOptions.getExtraBody();
 			return this;
 		}
 
@@ -204,15 +231,20 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 				}
 				this.isMicrosoftFoundry = castFrom.isMicrosoftFoundry();
 				this.isGitHubModels = castFrom.isGitHubModels();
-				if (castFrom.getTimeout() != null) {
-					this.timeout = castFrom.getTimeout();
-				}
+				this.timeout = castFrom.getTimeout();
 				this.maxRetries = castFrom.getMaxRetries();
 				if (castFrom.getProxy() != null) {
 					this.proxy = castFrom.getProxy();
 				}
 				if (castFrom.getCustomHeaders() != null) {
-					this.customHeaders = castFrom.getCustomHeaders();
+					if (this.customHeaders == null) {
+						this.customHeaders = new HashMap<>(castFrom.getCustomHeaders());
+					}
+					else {
+						Map<String, String> merged = new HashMap<>(this.customHeaders);
+						merged.putAll(castFrom.getCustomHeaders());
+						this.customHeaders = merged;
+					}
 				}
 			}
 			if (from instanceof OpenAiEmbeddingOptions castFrom) {
@@ -221,6 +253,16 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 				}
 				if (castFrom.getEncodingFormat() != null) {
 					this.encodingFormat = castFrom.getEncodingFormat();
+				}
+				if (castFrom.getExtraBody() != null) {
+					if (this.extraBody == null) {
+						this.extraBody = new HashMap<>(castFrom.getExtraBody());
+					}
+					else {
+						Map<String, Object> merged = new HashMap<>(this.extraBody);
+						merged.putAll(castFrom.getExtraBody());
+						this.extraBody = merged;
+					}
 				}
 			}
 			return this;
@@ -233,7 +275,7 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 			}
 			if (openAiCreateParams.encodingFormat().isPresent()) {
 				this.encodingFormat = EncodingFormat
-					.valueOf(openAiCreateParams.encodingFormat().get().asString().toUpperCase());
+					.valueOf(openAiCreateParams.encodingFormat().get().asString().toUpperCase(Locale.ROOT));
 			}
 			if (openAiCreateParams.dimensions().isPresent()) {
 				this.dimensions = Math.toIntExact(openAiCreateParams.dimensions().get());
@@ -241,18 +283,23 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 			return this;
 		}
 
-		public Builder user(String user) {
+		public Builder user(@Nullable String user) {
 			this.user = user;
 			return this;
 		}
 
-		public Builder encodingFormat(EncodingFormat encodingFormat) {
+		public Builder encodingFormat(@Nullable EncodingFormat encodingFormat) {
 			this.encodingFormat = encodingFormat;
 			return this;
 		}
 
-		public Builder dimensions(Integer dimensions) {
+		public Builder dimensions(@Nullable Integer dimensions) {
 			this.dimensions = dimensions;
+			return this;
+		}
+
+		public Builder extraBody(@Nullable Map<String, Object> extraBody) {
+			this.extraBody = extraBody;
 			return this;
 		}
 
@@ -261,7 +308,7 @@ public class OpenAiEmbeddingOptions extends AbstractOpenAiOptions implements Emb
 			return new OpenAiEmbeddingOptions(this.baseUrl, this.apiKey, this.credential, this.model,
 					this.microsoftDeploymentName, this.microsoftFoundryServiceVersion, this.organizationId,
 					this.isMicrosoftFoundry, this.isGitHubModels, this.timeout, this.maxRetries, this.proxy,
-					this.customHeaders, this.user, this.encodingFormat, this.dimensions);
+					this.customHeaders, this.user, this.encodingFormat, this.dimensions, this.extraBody);
 		}
 
 	}
